@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.env
+
+# Uploads & generated clips
+backend/uploads/
+backend/clips/
+backend/assets/music/
+backend/logs/
+backend/*.db
+
+# Test scripts
+backend/test_*.py
+backend/check_*.py
+
+# Node
+node_modules/
+.next/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store

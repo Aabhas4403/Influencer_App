@@ -1,0 +1,38 @@
+version: "3.8"
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: clipflow
+      POSTGRES_PASSWORD: clipflow
+      POSTGRES_DB: clipflow
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+    environment:
+      DATABASE_URL: postgresql+asyncpg://clipflow:clipflow@db:5432/clipflow
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+      SECRET_KEY: change-me-in-production
+      CORS_ORIGINS: http://localhost:3000
+    volumes:
+      - ./backend/uploads:/app/uploads
+      - ./backend/clips:/app/clips
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:

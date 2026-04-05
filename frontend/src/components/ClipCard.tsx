@@ -1,0 +1,214 @@
+"use client";
+
+import { useState } from "react";
+import {
+  Clip,
+  regenerateCaptions,
+  downloadClip,
+  customizeClip,
+  switchClipVersion,
+} from "@/lib/api";
+import CaptionBlock from "./CaptionBlock";
+
+interface Props {
+  clip: Clip;
+  index: number;
+}
+
+export default function ClipCard({ clip, index }: Props) {
+  const [data, setData] = useState(clip);
+  const [regenerating, setRegenerating] = useState(false);
+  const [customPrompt, setCustomPrompt] = useState("");
+  const [customizing, setCustomizing] = useState(false);
+  const [showCustomize, setShowCustomize] = useState(false);
+
+  const handleRegenerate = async () => {
+    setRegenerating(true);
+    try {
+      const updated = await regenerateCaptions(data.id);
+      setData(updated);
+    } catch {
+      // silent fail
+    } finally {
+      setRegenerating(false);
+    }
+  };
+
+  const handleCustomize = async () => {
+    if (!customPrompt.trim()) return;
+    setCustomizing(true);
+    try {
+      await customizeClip(data.id, customPrompt.trim());
+      setCustomPrompt("");
+      setShowCustomize(false);
+      // The customization runs in background — poll will update
+    } catch {
+      // silent fail
+    } finally {
+      setCustomizing(false);
+    }
+  };
+
+  const handleSwitchVersion = async (version: number) => {
+    try {
+      const updated = await switchClipVersion(data.id, version);
+      setData(updated);
+    } catch {
+      // silent fail
+    }
+  };
+
+  const duration = data.end_time - data.start_time;
+
+  return (
+    <div className="card">
+      {/* Header */}
+      <div className="flex items-start justify-between mb-4">
+        <div>
+          <div className="flex items-center gap-3">
+            <span className="flex h-7 w-7 items-center justify-center rounded-full bg-[#6d5dfc] text-xs font-bold">
+              {index}
+            </span>
+            <h3 className="font-medium">{data.title || `Clip ${index}`}</h3>
+            {data.versions.length > 1 && (
+              <span className="text-xs px-2 py-0.5 rounded-full bg-[#6d5dfc]/20 text-[#6d5dfc]">
+                V{data.active_version}
+              </span>
+            )}
+          </div>
+          <div className="mt-1 flex items-center gap-3 text-sm text-[#888]">
+            <span>⏱ {duration.toFixed(1)}s</span>
+            <span>🔥 Score: {data.score.toFixed(1)}</span>
+            <span>
+              {formatTime(data.start_time)} → {formatTime(data.end_time)}
+            </span>
+          </div>
+        </div>
+
+        <div className="flex gap-2">
+          <button
+            onClick={() => setShowCustomize(!showCustomize)}
+            className="btn-secondary text-xs"
+          >
+            ✏️ Customize
+          </button>
+          <button
+            onClick={handleRegenerate}
+            disabled={regenerating}
+            className="btn-secondary text-xs"
+          >
+            {regenerating ? "..." : "🔄 Regenerate"}
+          </button>
+          {data.video_path && (
+            <button
+              onClick={() =>
+                downloadClip(
+                  data.id,
+                  data.title || `clip_${index}`,
+                  data.active_version
+                )
+              }
+              className="btn-primary text-xs inline-flex items-center"
+            >
+              ⬇ Download
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Version Selector */}
+      {data.versions.length > 1 && (
+        <div className="mb-4 flex items-center gap-2 flex-wrap">
+          <span className="text-xs text-[#888]">Versions:</span>
+          {data.versions.map((v) => (
+            <button
+              key={v.id}
+              onClick={() => handleSwitchVersion(v.version_num)}
+              className={`text-xs px-3 py-1 rounded-full border transition-colors ${
+                v.version_num === data.active_version
+                  ? "border-[#6d5dfc] bg-[#6d5dfc]/20 text-[#6d5dfc]"
+                  : "border-[#333] text-[#888] hover:border-[#6d5dfc]/40"
+              }`}
+            >
+              V{v.version_num}
+              {v.custom_prompt && (
+                <span className="ml-1 opacity-60" title={v.custom_prompt}>
+                  ✏️
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Custom Requirements Panel */}
+      {showCustomize && (
+        <div className="mb-4 rounded-lg border border-[#333] p-4">
+          <label className="text-xs font-medium text-[#ededed] mb-2 block">
+            Custom Requirements
+          </label>
+          <textarea
+            value={customPrompt}
+            onChange={(e) => setCustomPrompt(e.target.value)}
+            placeholder="e.g. Make it more professional, add humor, focus on the key insight, use Hindi language..."
+            className="w-full rounded-lg bg-[#0a0a0a] border border-[#333] p-3 text-sm text-[#ededed] placeholder-[#555] resize-none focus:border-[#6d5dfc] focus:outline-none"
+            rows={3}
+          />
+          <div className="mt-2 flex justify-end gap-2">
+            <button
+              onClick={() => setShowCustomize(false)}
+              className="btn-secondary text-xs"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleCustomize}
+              disabled={customizing || !customPrompt.trim()}
+              className="btn-primary text-xs"
+            >
+              {customizing ? "Processing..." : "🚀 Run Changes"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Transcript */}
+      {data.transcript_text && (
+        <div className="mb-4 rounded-lg bg-[#0a0a0a] p-3 text-sm text-[#888]">
+          <span className="text-xs font-medium text-[#ededed]">Transcript: </span>
+          {data.transcript_text}
+        </div>
+      )}
+
+      {/* Captions Grid */}
+      <div className="grid gap-3 sm:grid-cols-2">
+        <CaptionBlock
+          platform="Instagram"
+          icon="📸"
+          content={data.caption_instagram}
+        />
+        <CaptionBlock
+          platform="LinkedIn"
+          icon="💼"
+          content={data.caption_linkedin}
+        />
+        <CaptionBlock
+          platform="Twitter/X"
+          icon="🐦"
+          content={data.caption_twitter}
+        />
+        <CaptionBlock
+          platform="YouTube"
+          icon="🎬"
+          content={data.caption_youtube}
+        />
+      </div>
+    </div>
+  );
+}
+
+function formatTime(seconds: number): string {
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
