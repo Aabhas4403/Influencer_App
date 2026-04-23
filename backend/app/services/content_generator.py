@@ -18,68 +18,78 @@ logger = logging.getLogger(__name__)
 
 # ── Prompt templates ──────────────────────────────────────────────
 
-INSTAGRAM_PROMPT = """Write a viral Instagram caption from this video transcript.
+INSTAGRAM_PROMPT = """You are a top Instagram Reels copywriter who writes captions
+that consistently go viral for creators in coaching, finance, fitness and lifestyle niches.
 
-Rules:
-- First line = strong hook (make them stop scrolling)
-- Short punchy sentences
-- Add 5 relevant hashtags at the end
-- Engaging and bold tone
-- Max 150 words
+Write a Reel caption from the transcript below.
 
-Transcript:
-{clip_text}
-
-Caption:"""
-
-LINKEDIN_PROMPT = """Turn this video transcript into a LinkedIn post.
-
-Style:
-- Start with a relatable hook or bold statement
-- Share the insight / lesson
-- End with a thought-provoking takeaway or question
-- Professional but conversational tone
-- Max 200 words
+NON-NEGOTIABLE RULES:
+- Line 1 = a SCROLL-STOPPING hook (curiosity gap, contrarian take, or bold promise). 8 words MAX.
+- Line 2 = blank.
+- 3-5 short value lines, each on its own line, plain language, no fluff.
+- End with a single open-loop question to drive comments.
+- Final line = exactly 5 niche-relevant hashtags (mix of broad + specific). No spammy tags.
+- Match the language of the transcript (English / Hindi / Hinglish). Do NOT translate.
+- Total length: under 130 words.
+- Output ONLY the caption. No preamble, no explanation, no quotes.
 
 Transcript:
-{clip_text}
+{clip_text}"""
 
-Post:"""
+LINKEDIN_PROMPT = """You are a top LinkedIn ghostwriter who writes for founders and operators.
 
-TWITTER_PROMPT = """Convert this video transcript into a Twitter/X thread of 3-5 tweets.
+Turn the transcript into a LinkedIn post that maximises dwell-time + comments.
 
-Style:
-- Tweet 1: Hook (make people click "Show more")
-- Remaining tweets: value-driven points
-- Last tweet: call to action or key takeaway
-- Keep each tweet under 280 characters
-- Simple language, punchy
+RULES:
+- Line 1 = a pattern-interrupt hook (a number, a contrarian claim, or a confession). 10 words MAX.
+- Use short paragraphs (1-2 sentences each), aggressive line breaks, NO emojis.
+- Tell the lesson as a mini-story: situation → tension → insight → takeaway.
+- End with a thought-provoking 1-line question.
+- Match the original language. Do NOT translate.
+- Under 180 words.
+- Output ONLY the post. No preamble.
 
-Format each tweet as:
+Transcript:
+{clip_text}"""
+
+TWITTER_PROMPT = """You are a top creator who writes high-engagement X/Twitter threads.
+
+Convert the transcript into a 4-6 tweet thread.
+
+RULES:
+- Tweet 1 = the hook tweet. Curiosity gap or bold claim, MUST make people tap "Show more".
+  Add 1 line break, then a one-line teaser of what's inside the thread.
+- Tweets 2..N-1 = one specific, concrete insight per tweet. Use line breaks for rhythm.
+  No filler ("As I said earlier..."). Each tweet must stand alone.
+- Last tweet = a single CTA: "Follow @ for more on X" OR "If this hit, retweet the first tweet."
+- Each tweet < 270 chars.
+- Match the original language.
+- Output format:
 1/ ...
 2/ ...
 3/ ...
+- Output ONLY the thread. No preamble.
 
 Transcript:
-{clip_text}
+{clip_text}"""
 
-Thread:"""
+YOUTUBE_PROMPT = """You are a YouTube Shorts strategist optimising for retention + CTR.
 
-YOUTUBE_PROMPT = """Generate a YouTube Shorts title and description from this transcript.
+From the transcript, generate ONE title and ONE description.
 
-Rules:
-- Title: catchy, under 60 characters, retention-optimized
-- Description: 2-3 sentences summarizing the clip + relevant keywords
-- Include a call to action
-
-Format:
+RULES:
+- Title: 40-55 chars, includes a number or strong emotion or curiosity gap.
+  No clickbait lies — must reflect the clip.
+- Description: 2 short sentences summarising the value, plus 3-5 keywords on a new line
+  (each prefixed with #).
+- End with one CTA line ("Subscribe for daily clips like this.").
+- Match the original language.
+- Output format exactly:
 Title: ...
 Description: ...
 
 Transcript:
-{clip_text}
-
-Output:"""
+{clip_text}"""
 
 
 def _call_ollama(prompt: str) -> str:

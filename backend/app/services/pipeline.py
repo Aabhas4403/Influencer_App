@@ -9,6 +9,7 @@ Features:
   - Clip versioning
 """
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -21,7 +22,7 @@ from sqlalchemy.orm import selectinload
 from app.config import CLIPS_DIR
 from app.database import async_session
 from app.models import Project, Clip, ClipVersion
-from app.services.transcription_service import transcribe, generate_srt
+from app.services.transcription_service import transcribe, generate_srt, flatten_words
 from app.services.clip_detection import detect_clips
 from app.services.video_processor import process_clip, get_video_duration
 from app.services.content_generator import generate_all_captions
@@ -161,7 +162,7 @@ async def run_pipeline(project_id: str):
                                        "Detecting language & transcribing (Hindi/English/Hinglish)...",
                                        eta=int(video_dur * 0.25))
 
-                transcript_result = transcribe(video_path)
+                transcript_result = await asyncio.to_thread(transcribe, video_path)
                 project.transcript = transcript_result["full_text"]
                 project.duration = video_dur
                 language = transcript_result.get("language", "english")
@@ -186,7 +187,9 @@ async def run_pipeline(project_id: str):
             await _update_progress(db, project, 55, "Detecting viral moments",
                                    f"Scoring {len(chunks)} segments...")
 
-            top_clips = detect_clips(chunks, top_n=5, full_text=project.transcript or "")
+            top_clips = await asyncio.to_thread(
+                detect_clips, chunks, 5, 20.0, 60.0, project.transcript or ""
+            )
             if not top_clips:
                 project.status = "failed"
                 project.progress_stage = "No clips detected"
@@ -218,6 +221,11 @@ async def run_pipeline(project_id: str):
                              "end": c["end"] - clip_data["start"],
                              "text": c["text"]} for c in clip_chunks]
 
+                # Word-level timestamps (used by word-pop captions, kept in absolute time)
+                all_words = flatten_words(chunks)
+                clip_words = [w for w in all_words
+                              if clip_data["start"] <= w["start"] < clip_data["end"]]
+
                 # Generate SRT file
                 srt_path = str(Path(clip_output_dir) / f"clip_{i}.srt")
                 Path(clip_output_dir).mkdir(parents=True, exist_ok=True)
@@ -226,21 +234,25 @@ async def run_pipeline(project_id: str):
                 # Professional video processing (uses ORIGINAL video — no silence removal)
                 final_path = None
                 try:
-                    final_path = process_clip(
-                        source_video=video_path,
-                        start=clip_data["start"],
-                        end=clip_data["end"],
-                        srt_path=srt_path,
-                        output_dir=clip_output_dir,
-                        clip_index=i,
-                        caption_chunks=adjusted,
-                        language=language,
-                        professional=True,
+                    final_path = await asyncio.to_thread(
+                        process_clip,
+                        video_path,
+                        clip_data["start"],
+                        clip_data["end"],
+                        srt_path,
+                        clip_output_dir,
+                        i,
+                        None,             # version
+                        adjusted,         # caption_chunks
+                        clip_words,       # word_timestamps
+                        language,
+                        True,             # professional
+                        clip_data.get("title"),
                     )
                 except Exception as e:
                     logger.error(f"[{project_id}] Clip {i} failed: {e}")
 
-                captions = generate_all_captions(clip_data["text"])
+                captions = await asyncio.to_thread(generate_all_captions, clip_data["text"])
 
                 clip = Clip(
                     project_id=project.id,
@@ -311,7 +323,9 @@ async def run_clip_customize(clip_id: str, custom_prompt: str):
             logger.info(f"[clip {clip_id}] Creating V{new_ver}: {custom_prompt[:60]}...")
 
             from app.services.content_generator import generate_all_captions_custom
-            captions = generate_all_captions_custom(clip.transcript_text, custom_prompt)
+            captions = await asyncio.to_thread(
+                generate_all_captions_custom, clip.transcript_text, custom_prompt
+            )
 
             # Re-process video if prompt mentions video changes
             clip_dir = str(CLIPS_DIR / str(clip.project_id))
@@ -320,16 +334,31 @@ async def run_clip_customize(clip_id: str, custom_prompt: str):
             video_kws = ["crop", "zoom", "music", "speed", "slow", "transition", "effect", "edit", "professional"]
             if any(kw in custom_prompt.lower() for kw in video_kws):
                 try:
-                    video_path = process_clip(
-                        source_video=project.video_path,
-                        start=clip.start_time,
-                        end=clip.end_time,
-                        srt_path=clip.srt_path,
-                        output_dir=clip_dir,
-                        clip_index=clip.clip_index,
-                        version=new_ver,
-                        language=project.language or "english",
-                        professional=True,
+                    # Reload word timestamps from cached chunks if available
+                    word_timestamps = None
+                    chunks_file = Path(project.video_path).with_suffix(".chunks.json")
+                    if chunks_file.exists():
+                        import json as _json
+                        with open(chunks_file) as f:
+                            cached_chunks = _json.load(f)
+                        all_words = flatten_words(cached_chunks)
+                        word_timestamps = [w for w in all_words
+                                           if clip.start_time <= w["start"] < clip.end_time]
+
+                    video_path = await asyncio.to_thread(
+                        process_clip,
+                        project.video_path,
+                        clip.start_time,
+                        clip.end_time,
+                        clip.srt_path,
+                        clip_dir,
+                        clip.clip_index,
+                        new_ver,
+                        None,                       # caption_chunks
+                        word_timestamps,
+                        project.language or "english",
+                        True,                       # professional
+                        clip.title,
                     )
                 except Exception as e:
                     logger.error(f"[clip {clip_id}] V{new_ver} video failed: {e}")

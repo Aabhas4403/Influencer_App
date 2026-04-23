@@ -11,3 +11,13 @@ python-multipart==0.0.9
 pydantic[email]==2.9.0
 requests>=2.32.2
 yt-dlp>=2024.8.6
+
+# AI / ML
+faster-whisper>=1.0.3      # primary transcription engine (4-10x faster than openai-whisper)
+openai-whisper>=20231117   # fallback transcription engine
+numpy>=1.26.0
+opencv-python>=4.10.0      # face tracking for smooth auto-reframe
+Pillow>=10.4.0             # caption rendering
+
+# Optional but recommended
+scenedetect>=0.6.4         # smart scene-change detection for clip boundaries
