@@ -24,13 +24,15 @@ from app.config import (
     FFMPEG_PATH, BASE_DIR,
     CAPTION_STYLE, WORD_POP_CAPTIONS, PUNCH_ZOOMS,
     HOOK_INTRO, CTA_ENDCARD, CTA_TEXT, SMOOTH_SPEAKER_TRACK,
+    GRID_SPEAKER_TRACK, GRID_TRACK_COLS, GRID_TRACK_ROWS,
     TRIM_SILENCES, SILENCE_THRESHOLD_DB, SILENCE_MIN_DURATION, SILENCE_PADDING,
     TRIM_FILLER_WORDS, FILLER_PAD_MS,
 )
 from app.services import editing
 from app.services.editing import (
     get_dims, get_fps, get_duration,
-    track_speaker, smooth_track, build_pan_crop_filter,
+    track_speaker, track_speaker_grid, smooth_track, build_pan_crop_filter,
+    build_dynamic_frame_graph,
     extract_audio_energy, find_emphasis_times, build_zoompan_expression,
     get_caption_style, group_words_into_chunks, generate_overlay_video,
     trim_silences,
@@ -124,6 +126,11 @@ def process_clip(
     filters: List[str] = []
     aspect = sw / sh if sh > 0 else 1.0
 
+    # Will be set in landscape branch when we use a filter_complex graph for
+    # dynamic speaker-following + blurred-letterbox wide shots.
+    complex_prefix: Optional[str] = None
+    chain_in_label: Optional[str] = None  # label feeding the linear `filters` chain
+
     if aspect <= 0.5625 + 0.05:
         # Already vertical-ish — pad/scale
         filters.append("scale=1080:1920:force_original_aspect_ratio=decrease")
@@ -132,13 +139,37 @@ def process_clip(
         # Landscape → smooth speaker-tracked vertical crop
         crop_w = int(sh * 9 / 16)
         if SMOOTH_SPEAKER_TRACK:
-            track = track_speaker(source_video, start, duration, sample_hz=2.0)
-            track = smooth_track(track, alpha=0.25)
-            filters.append(build_pan_crop_filter(track, sw, sh, crop_w))
-            logger.info(f"Clip {clip_index}: speaker track → {len(track)} keyframes")
+            if GRID_SPEAKER_TRACK:
+                track = track_speaker_grid(
+                    source_video, start, duration,
+                    src_w=sw, src_h=sh, base_crop_w=crop_w,
+                    grid_cols=GRID_TRACK_COLS, grid_rows=GRID_TRACK_ROWS,
+                    sample_hz=2.0,
+                )
+                tracker_name = f"grid({GRID_TRACK_ROWS}x{GRID_TRACK_COLS})"
+            else:
+                track = track_speaker(
+                    source_video, start, duration,
+                    src_w=sw, src_h=sh, base_crop_w=crop_w,
+                    sample_hz=2.0,
+                )
+                tracker_name = "face/mouth"
+            track = smooth_track(track, alpha_cx=0.25, alpha_cw=0.12)
+            n_wide = sum(1 for p in track if p.cw > crop_w * 1.05)
+            complex_prefix = build_dynamic_frame_graph(
+                track, src_w=sw, src_h=sh, base_crop_w=crop_w,
+                in_label="0:v", out_label="framed",
+                out_w=1080, out_h=1920,
+            )
+            chain_in_label = "framed"
+            logger.info(
+                f"Clip {clip_index}: {tracker_name} tracker → {len(track)} keyframes "
+                f"({n_wide} wide-shot frames)"
+            )
         else:
+            # Static center crop fallback.
             filters.append(f"crop={crop_w}:{sh}:(in_w-{crop_w})/2:0")
-        filters.append("scale=1080:1920")
+            filters.append("scale=1080:1920")
 
     if professional:
         # Color grade
@@ -167,15 +198,36 @@ def process_clip(
         af_parts.append("loudnorm=I=-16:TP=-1.5:LRA=11")
     af = ",".join(af_parts)
 
-    cmd = [
-        FFMPEG_PATH, "-y",
-        "-ss", str(start), "-i", source_video, "-t", str(duration),
-        "-vf", vf, "-af", af,
-        "-c:v", "libx264", "-preset", "fast", "-crf", "21",
-        "-c:a", "aac", "-b:a", "128k",
-        "-r", str(fps),
-        base_clip,
-    ]
+    if complex_prefix and chain_in_label:
+        # Compose: <complex_prefix>;[chain_in_label]<linear filters>[vout]
+        if vf:
+            graph = f"{complex_prefix};[{chain_in_label}]{vf}[vout]"
+        else:
+            graph = f"{complex_prefix.replace(f'[{chain_in_label}]', '[vout]', 1)}"
+            # Fallback: if we had no extra filters, just rename the last label.
+            if "[vout]" not in graph:
+                graph = f"{complex_prefix};[{chain_in_label}]copy[vout]"
+        cmd = [
+            FFMPEG_PATH, "-y",
+            "-ss", str(start), "-i", source_video, "-t", str(duration),
+            "-filter_complex", graph,
+            "-map", "[vout]", "-map", "0:a?",
+            "-af", af,
+            "-c:v", "libx264", "-preset", "fast", "-crf", "21",
+            "-c:a", "aac", "-b:a", "128k",
+            "-r", str(fps),
+            base_clip,
+        ]
+    else:
+        cmd = [
+            FFMPEG_PATH, "-y",
+            "-ss", str(start), "-i", source_video, "-t", str(duration),
+            "-vf", vf, "-af", af,
+            "-c:v", "libx264", "-preset", "fast", "-crf", "21",
+            "-c:a", "aac", "-b:a", "128k",
+            "-r", str(fps),
+            base_clip,
+        ]
     logger.info(f"Clip {clip_index}: base render ({start:.1f}-{end:.1f}s, professional={professional})")
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:

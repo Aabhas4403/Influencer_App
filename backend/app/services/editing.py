@@ -372,21 +372,40 @@ def _get_cascade():
 
 @dataclass
 class TrackPoint:
-    t: float        # seconds (relative to clip start)
-    cx: float       # face center X in source coords
+    t: float           # seconds (relative to clip start)
+    cx: float          # speaker / group center X in source coords
+    cw: float          # desired crop width in source pixels (widens for multi-speakers)
     confidence: float  # 0..1
 
 
-def track_speaker(
+def track_speaker_grid(
     video_path: str,
     start: float,
     duration: float,
+    src_w: int,
+    src_h: int,
+    base_crop_w: int,
+    grid_cols: int = 3,
+    grid_rows: int = 3,
     sample_hz: float = 2.0,
 ) -> List[TrackPoint]:
-    """Sample the video twice per second and return a list of face-center X positions.
+    """Grid-based active-speaker tracking.
 
-    Used to drive a smooth panning crop. Frames with no face inherit the
-    previous valid X (no lateral jump). EMA smoothing is applied later.
+    The frame is divided into a `grid_rows x grid_cols` grid (default 3x3).
+    At every tick we score *every* cell continuously by:
+        score = motion_in_cell × face_boost
+    where motion is the mean abs pixel diff between two frames sampled
+    ~120 ms apart, and face_boost is 2.5× if a detected face center lies
+    inside the cell (1.0× otherwise).
+
+    The winning cell drives the crop center. When several cells score
+    near-equally (≥ 60 % of the best), we widen the crop to enclose them —
+    producing the dynamic "zoom out to show both speakers" behavior.
+
+    This is more robust than face-only tracking because it still picks up
+    speakers whose faces fail Haar detection (profile views, side angles,
+    partial occlusion), since their gestures and mouth motion still register
+    as motion in their cell.
     """
     points: List[TrackPoint] = []
     try:
@@ -395,27 +414,241 @@ def track_speaker(
         n_samples = max(int(duration * sample_hz), 1)
         cascade = _get_cascade()
 
-        last_cx = None
+        cell_w = src_w / grid_cols
+        cell_h = src_h / grid_rows
+        # Pre-compute the column-center X for each grid column.
+        col_cx = [(c + 0.5) * cell_w for c in range(grid_cols)]
+
+        last_cx: Optional[float] = None
+        last_cw: float = float(base_crop_w)
+        last_col: Optional[int] = None
+        lip_dt = 0.12
+
+        MIN_SCORE = 0.8     # noise floor for "something is happening"
+        HOT_RATIO = 0.60    # cells ≥ this fraction of best are co-active
+        FACE_BOOST = 2.5
+        MOMENTUM_BOOST = 1.20  # bias toward staying on the previously winning column
+
         for i in range(n_samples):
             t_rel = i / sample_hz
             t_abs = start + t_rel
+
             cap.set(cv2.CAP_PROP_POS_FRAMES, int(t_abs * cap_fps))
-            ok, frame = cap.read()
-            if not ok:
+            ok_a, frame_a = cap.read()
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int((t_abs + lip_dt) * cap_fps))
+            ok_b, frame_b = cap.read()
+
+            if not ok_a or not ok_b:
                 if last_cx is not None:
-                    points.append(TrackPoint(t_rel, last_cx, 0.0))
+                    points.append(TrackPoint(t_rel, last_cx, last_cw, 0.0))
                 continue
 
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4, minSize=(60, 60))
-            if len(faces) > 0:
-                largest = max(faces, key=lambda f: f[2] * f[3])
-                x, _, w, _ = largest
+            gray_a = cv2.cvtColor(frame_a, cv2.COLOR_BGR2GRAY)
+            gray_b = cv2.cvtColor(frame_b, cv2.COLOR_BGR2GRAY)
+            if gray_a.shape != gray_b.shape:
+                if last_cx is not None:
+                    points.append(TrackPoint(t_rel, last_cx, last_cw, 0.0))
+                continue
+
+            diff = np.abs(gray_a.astype(np.int16) - gray_b.astype(np.int16))
+
+            # Detect faces ONCE on frame_a; tag which (row, col) each falls in.
+            faces = cascade.detectMultiScale(
+                gray_a, scaleFactor=1.1, minNeighbors=4, minSize=(60, 60)
+            )
+            face_cells = set()
+            for (fx, fy, fw, fh) in faces:
+                fcx = fx + fw / 2; fcy = fy + fh / 2
+                cc = min(grid_cols - 1, max(0, int(fcx // cell_w)))
+                rr = min(grid_rows - 1, max(0, int(fcy // cell_h)))
+                face_cells.add((rr, cc))
+
+            # Score every cell.
+            scores = np.zeros((grid_rows, grid_cols), dtype=np.float32)
+            for r in range(grid_rows):
+                y0 = int(r * cell_h); y1 = int((r + 1) * cell_h)
+                for c in range(grid_cols):
+                    x0 = int(c * cell_w); x1 = int((c + 1) * cell_w)
+                    cell = diff[y0:y1, x0:x1]
+                    if cell.size == 0:
+                        continue
+                    s = float(cell.mean())
+                    if (r, c) in face_cells:
+                        s *= FACE_BOOST
+                    if last_col is not None and c == last_col:
+                        s *= MOMENTUM_BOOST
+                    scores[r, c] = s
+
+            best = float(scores.max())
+            if best < MIN_SCORE:
+                # Static frame — hold last position, ease back to base width.
+                cx = last_cx if last_cx is not None else src_w / 2.0
+                cw = float(base_crop_w)
+                last_cx, last_cw = cx, cw
+                points.append(TrackPoint(t_rel, cx, cw, 0.0))
+                continue
+
+            # Find all "hot" cells (co-active with the winner).
+            hot_mask = scores >= (HOT_RATIO * best)
+            hot_cols = sorted({c for r in range(grid_rows) for c in range(grid_cols) if hot_mask[r, c]})
+
+            if len(hot_cols) >= 2:
+                # WIDE: enclose all hot columns.
+                left_x = hot_cols[0] * cell_w
+                right_x = (hot_cols[-1] + 1) * cell_w
+                group_cx = (left_x + right_x) / 2.0
+                group_span = right_x - left_x
+                desired_w = group_span * 1.20  # small padding
+                cw = max(float(base_crop_w), min(desired_w, float(src_w)))
+                # Pick the dominant column among hot ones to remember.
+                col_scores = scores.max(axis=0)
+                last_col = int(np.argmax(col_scores))
+                last_cx, last_cw = group_cx, cw
+                points.append(TrackPoint(t_rel, group_cx, cw, 1.0))
+            else:
+                # TIGHT: snap to the winning column's center.
+                # (Use sub-cell precision: weight by face center if available.)
+                best_r, best_c = np.unravel_index(int(np.argmax(scores)), scores.shape)
+                cx = col_cx[best_c]
+                # If a face exists in the winning cell, refine cx to that face's center.
+                for (fx, fy, fw, fh) in faces:
+                    fcx = fx + fw / 2; fcy = fy + fh / 2
+                    cc = min(grid_cols - 1, max(0, int(fcx // cell_w)))
+                    rr = min(grid_rows - 1, max(0, int(fcy // cell_h)))
+                    if rr == best_r and cc == best_c:
+                        cx = float(fcx)
+                        break
+                last_col = int(best_c)
+                last_cx, last_cw = float(cx), float(base_crop_w)
+                points.append(TrackPoint(t_rel, last_cx, last_cw, 1.0))
+
+        cap.release()
+    except Exception as e:
+        logger.debug(f"Grid speaker tracking failed: {e}")
+
+    return points
+
+
+def track_speaker(
+    video_path: str,
+    start: float,
+    duration: float,
+    src_w: int,
+    src_h: int,
+    base_crop_w: int,
+    sample_hz: float = 2.0,
+) -> List[TrackPoint]:
+    """Sample the video ~twice per second and return per-tick framing decisions.
+
+    For each sample point we grab two frames ~120ms apart and detect faces in
+    both. For every face we measure the absolute pixel difference in its mouth
+    region (lower 45 % × inner 70 % of the bbox); that becomes a per-face
+    "speaking score".
+
+    Framing logic per tick:
+      - 0 faces  → hold last position (or center) at base width.
+      - 1 face   → tight crop centered on that face.
+      - 2+ faces, only one speaking → tight crop on the active speaker.
+      - 2+ faces, multiple speaking (or rapid back-and-forth) → wide crop
+        centered on the midpoint of the speaking group, widened to enclose
+        them with padding (capped at src_w). The wider crop is what later
+        produces the "zoomed-out, blurred letterbox" wide shot.
+    """
+    points: List[TrackPoint] = []
+    try:
+        cap = cv2.VideoCapture(video_path)
+        cap_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        n_samples = max(int(duration * sample_hz), 1)
+        cascade = _get_cascade()
+
+        last_cx: Optional[float] = None
+        last_cw: float = float(base_crop_w)
+        lip_dt = 0.12
+
+        # When motion is below this absolute threshold we treat a face as
+        # silent (helps avoid false multi-speaker on noisy frames).
+        MIN_MOTION = 1.5
+        # A face is "actively speaking" if its motion is at least this fraction
+        # of the loudest mouth in the frame.
+        ACTIVE_RATIO = 0.55
+
+        for i in range(n_samples):
+            t_rel = i / sample_hz
+            t_abs = start + t_rel
+
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(t_abs * cap_fps))
+            ok_a, frame_a = cap.read()
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int((t_abs + lip_dt) * cap_fps))
+            ok_b, frame_b = cap.read()
+
+            if not ok_a:
+                if last_cx is not None:
+                    points.append(TrackPoint(t_rel, last_cx, last_cw, 0.0))
+                continue
+
+            gray_a = cv2.cvtColor(frame_a, cv2.COLOR_BGR2GRAY)
+            faces = cascade.detectMultiScale(
+                gray_a, scaleFactor=1.1, minNeighbors=4, minSize=(60, 60)
+            )
+            if len(faces) == 0:
+                if last_cx is not None:
+                    points.append(TrackPoint(t_rel, last_cx, last_cw, 0.0))
+                continue
+
+            # Single face — easy.
+            if len(faces) == 1 or not ok_b:
+                x, _, w, _ = faces[0]
                 cx = float(x + w / 2)
-                last_cx = cx
-                points.append(TrackPoint(t_rel, cx, 1.0))
-            elif last_cx is not None:
-                points.append(TrackPoint(t_rel, last_cx, 0.0))
+                last_cx, last_cw = cx, float(base_crop_w)
+                points.append(TrackPoint(t_rel, cx, last_cw, 1.0))
+                continue
+
+            # Multi-face: score each by mouth motion.
+            gray_b = cv2.cvtColor(frame_b, cv2.COLOR_BGR2GRAY)
+            h_a, w_a = gray_a.shape
+            scored: List[Tuple[float, float, int, int]] = []  # (motion, cx, fx, fx+fw)
+            for (fx, fy, fw, fh) in faces:
+                my0 = int(fy + fh * 0.55); my1 = int(fy + fh)
+                mx0 = int(fx + fw * 0.15); mx1 = int(fx + fw * 0.85)
+                my0, my1 = max(0, my0), min(h_a, my1)
+                mx0, mx1 = max(0, mx0), min(w_a, mx1)
+                if my1 <= my0 or mx1 <= mx0:
+                    continue
+                a = gray_a[my0:my1, mx0:mx1].astype(np.int16)
+                b = gray_b[my0:my1, mx0:mx1].astype(np.int16)
+                if a.shape != b.shape or a.size == 0:
+                    continue
+                motion = float(np.abs(a - b).mean())
+                cx = float(fx + fw / 2)
+                # Momentum bias for the currently tracked speaker.
+                if last_cx is not None and abs(cx - last_cx) < 20:
+                    motion *= 1.25
+                scored.append((motion, cx, int(fx), int(fx + fw)))
+
+            if not scored:
+                if last_cx is not None:
+                    points.append(TrackPoint(t_rel, last_cx, last_cw, 0.0))
+                continue
+
+            max_m = max(s[0] for s in scored)
+            active = [s for s in scored if s[0] >= MIN_MOTION and s[0] >= ACTIVE_RATIO * max_m]
+
+            if len(active) >= 2:
+                # WIDE SHOT: enclose all active speakers.
+                left = min(s[2] for s in active)
+                right = max(s[3] for s in active)
+                group_cx = (left + right) / 2.0
+                group_span = right - left
+                # Pad the group bbox by 35 % so faces aren't kissing the edges.
+                desired_w = group_span * 1.35
+                cw = max(float(base_crop_w), min(desired_w, float(src_w)))
+                last_cx, last_cw = group_cx, cw
+                points.append(TrackPoint(t_rel, group_cx, cw, 1.0))
+            else:
+                # TIGHT SHOT on the dominant speaker.
+                _, best_cx, _, _ = max(scored, key=lambda s: s[0])
+                last_cx, last_cw = best_cx, float(base_crop_w)
+                points.append(TrackPoint(t_rel, best_cx, last_cw, 1.0))
 
         cap.release()
     except Exception as e:
@@ -424,16 +657,43 @@ def track_speaker(
     return points
 
 
-def smooth_track(points: List[TrackPoint], alpha: float = 0.25) -> List[TrackPoint]:
-    """EMA-smooth the track and clamp jumps to avoid jarring snaps."""
+def smooth_track(
+    points: List[TrackPoint],
+    alpha_cx: float = 0.25,
+    alpha_cw: float = 0.12,
+) -> List[TrackPoint]:
+    """EMA-smooth both the pan (cx) and the zoom (cw) channels.
+
+    cw is smoothed more slowly so we don't pop in/out of the wide shot — the
+    camera should ease between tight and wide framing.
+    """
     if not points:
         return points
     smoothed: List[TrackPoint] = []
-    s = points[0].cx
+    sx = points[0].cx
+    sw = points[0].cw
     for p in points:
-        s = alpha * p.cx + (1 - alpha) * s
-        smoothed.append(TrackPoint(p.t, s, p.confidence))
+        sx = alpha_cx * p.cx + (1 - alpha_cx) * sx
+        sw = alpha_cw * p.cw + (1 - alpha_cw) * sw
+        smoothed.append(TrackPoint(p.t, sx, sw, p.confidence))
     return smoothed
+
+
+def _piecewise_expr(times: List[float], values: List[float]) -> str:
+    """Build an FFmpeg piecewise-linear expression in t (clip-relative)."""
+    if not times:
+        return "0"
+    if len(times) == 1:
+        return f"{values[0]:.1f}"
+    expr = f"{values[-1]:.1f}"
+    for i in range(len(times) - 1, 0, -1):
+        t0, t1 = times[i - 1], times[i]
+        v0, v1 = values[i - 1], values[i]
+        if t1 <= t0:
+            continue
+        seg = f"({v0:.1f}+({v1 - v0:.1f})*(t-{t0:.2f})/{t1 - t0:.2f})"
+        expr = f"if(lt(t,{t1:.2f}),{seg},{expr})"
+    return expr
 
 
 def build_pan_crop_filter(
@@ -442,40 +702,111 @@ def build_pan_crop_filter(
     src_h: int,
     crop_w: int,
 ) -> str:
-    """Build an FFmpeg crop filter that pans the X position over time.
-
-    Uses ffmpeg expressions: x as a piecewise interpolation across keyframes.
+    """Legacy fixed-width pan crop. Kept for callers that don't want the
+    dynamic zoom-out behavior. New code should use build_dynamic_frame_graph.
     """
     if not track:
-        # Static center crop
         return f"crop={crop_w}:{src_h}:(in_w-{crop_w})/2:0"
-
-    # Clamp center positions so crop window stays inside frame
+    if len(track) > 40:
+        step = len(track) // 40
+        track = track[::step]
     half = crop_w / 2
     max_cx = src_w - half
+    times = [p.t for p in track]
+    xs = [max(half, min(p.cx, max_cx)) - half for p in track]
+    expr = _piecewise_expr(times, xs)
+    return f"crop={crop_w}:{src_h}:'{expr}':0"
 
-    # Build a piecewise expression: lerp between successive keyframes.
-    # For simplicity & FFmpeg expr length, downsample keyframes if too many.
+
+def build_dynamic_frame_graph(
+    track: List[TrackPoint],
+    src_w: int,
+    src_h: int,
+    base_crop_w: int,
+    in_label: str = "0:v",
+    out_label: str = "framed",
+    out_w: int = 1080,
+    out_h: int = 1920,
+    blur_strength: int = 22,
+) -> str:
+    """Build a -filter_complex sub-graph that:
+      • pans a crop window to the active speaker, AND
+      • dynamically widens the crop (and shrinks crop height to keep the
+        crop's aspect a bit wider than 9:16) when multiple speakers are
+        active, then
+      • scales the crop into the 1080×1920 output, padding above/below with
+        a blurred copy of the source — so the foreground is a "zoomed-out"
+        wide shot while the background fills the canvas with a soft blur.
+
+    Returns a string ending in `[{out_label}]` and accepting `[{in_label}]`.
+
+    The dynamic crop's width varies in t; height is held at src_h whenever
+    cw ≤ base_crop_w (giving a true 9:16 tight shot that fills the canvas
+    with no visible blur), and is reduced to keep the crop ≤ 9:16 when cw
+    grows wider than base — at which point the scaled crop is letterboxed
+    inside the blurred bg.
+    """
+    if not track:
+        # Static center crop fallback.
+        return (
+            f"[{in_label}]split=2[bgsrc][fgsrc];"
+            f"[bgsrc]scale={out_w}:{out_h}:force_original_aspect_ratio=increase,"
+            f"crop={out_w}:{out_h},boxblur={blur_strength}:1,eq=brightness=-0.05[bg];"
+            f"[fgsrc]crop={base_crop_w}:{src_h}:(in_w-{base_crop_w})/2:0,"
+            f"scale={out_w}:{out_h}[fg];"
+            f"[bg][fg]overlay=x=0:y=0[{out_label}]"
+        )
+
+    # Downsample keyframes to keep expression strings manageable.
     if len(track) > 40:
         step = len(track) // 40
         track = track[::step]
 
-    # Build nested if() expression: if(lt(t,t1), x0+(x1-x0)*(t-t0)/(t1-t0), if(...))
-    def clamp(cx: float) -> float:
-        return max(half, min(cx, max_cx)) - half  # convert to top-left X
+    times = [p.t for p in track]
 
-    # Tail value: last point
-    expr = f"{clamp(track[-1].cx):.1f}"
-    for i in range(len(track) - 1, 0, -1):
-        t0, t1 = track[i - 1].t, track[i].t
-        x0, x1 = clamp(track[i - 1].cx), clamp(track[i].cx)
-        if t1 <= t0:
-            continue
-        seg = f"({x0:.1f}+({x1 - x0:.1f})*(t-{t0:.2f})/{t1 - t0:.2f})"
-        expr = f"if(lt(t,{t1:.2f}),{seg},{expr})"
+    # Per-keyframe clamped values:
+    #   cw_k = clamp(track.cw, base_crop_w, src_w)
+    #   ch_k = min(src_h, cw_k * src_h / base_crop_w)   ← keeps aspect ≤ 9:16-ish
+    #     Actually: keep cw/ch == base_crop_w/src_h (i.e. 9:16) as long as ch ≤ src_h.
+    #     If cw > base_crop_w, we'd need ch = cw * src_h / base_crop_w > src_h → cap ch at src_h
+    #     and let the foreground become wider than 9:16; the overlay will then
+    #     show as a horizontal letterbox inside the blurred bg.
+    cws: List[float] = []
+    chs: List[float] = []
+    xs: List[float] = []
+    ys: List[float] = []
+    for p in track:
+        cw = max(float(base_crop_w), min(p.cw, float(src_w)))
+        # Keep crop's aspect at 9:16 until ch hits src_h.
+        ratio_h = cw * (src_h / float(base_crop_w))
+        ch = min(float(src_h), ratio_h)
+        # Center on cx, clamp inside frame.
+        x = p.cx - cw / 2.0
+        x = max(0.0, min(x, src_w - cw))
+        y = (src_h - ch) / 2.0
+        cws.append(cw); chs.append(ch); xs.append(x); ys.append(y)
 
-    # Final wrap: clamp t into valid range
-    return f"crop={crop_w}:{src_h}:'{expr}':0"
+    cw_expr = _piecewise_expr(times, cws)
+    ch_expr = _piecewise_expr(times, chs)
+    x_expr  = _piecewise_expr(times, xs)
+    y_expr  = _piecewise_expr(times, ys)
+
+    # Inside FFmpeg crop expressions, ' is the quote that wraps an expression
+    # already; we use commas freely. We wrap each expr in single quotes at the
+    # filter-arg level. To keep the filter-complex parse safe we escape via
+    # backslash-comma is not needed here because crop accepts comma-less exprs.
+
+    return (
+        f"[{in_label}]split=2[bgsrc][fgsrc];"
+        # Background: blurred, brightness-dimmed copy filling 1080x1920.
+        f"[bgsrc]scale={out_w}:{out_h}:force_original_aspect_ratio=increase,"
+        f"crop={out_w}:{out_h},boxblur={blur_strength}:1,eq=brightness=-0.05[bg];"
+        # Foreground: dynamic crop following speaker(s), scaled to fit width.
+        f"[fgsrc]crop=w='{cw_expr}':h='{ch_expr}':x='{x_expr}':y='{y_expr}',"
+        f"scale={out_w}:-2[fg];"
+        # Overlay centered vertically; horizontal x=0 since fg width == out_w.
+        f"[bg][fg]overlay=x=0:y='(main_h-overlay_h)/2'[{out_label}]"
+    )
 
 
 # ─────────────────────────── Audio energy / punch-ins ───────────────────────────

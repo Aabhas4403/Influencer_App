@@ -66,6 +66,11 @@ CTA_ENDCARD = os.getenv("CTA_ENDCARD", "true").lower() == "true"
 CTA_TEXT = os.getenv("CTA_TEXT", "FOLLOW FOR MORE")
 # Smooth speaker tracking (per-second face track w/ EMA) instead of one-shot crop
 SMOOTH_SPEAKER_TRACK = os.getenv("SMOOTH_SPEAKER_TRACK", "true").lower() == "true"
+# Use 3x3 grid-based active-speaker detection (more robust than face-only).
+# When false, falls back to the legacy face/mouth-motion tracker.
+GRID_SPEAKER_TRACK = os.getenv("GRID_SPEAKER_TRACK", "true").lower() == "true"
+GRID_TRACK_COLS = int(os.getenv("GRID_TRACK_COLS", "3"))
+GRID_TRACK_ROWS = int(os.getenv("GRID_TRACK_ROWS", "3"))
 # Trim long silent gaps from each clip (tightens pacing, influencer-style)
 TRIM_SILENCES = os.getenv("TRIM_SILENCES", "false").lower() == "true"
 SILENCE_THRESHOLD_DB = float(os.getenv("SILENCE_THRESHOLD_DB", "-30"))

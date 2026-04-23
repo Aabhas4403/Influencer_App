@@ -47,8 +47,43 @@ export default function ClipSelector({ projectId, sourceFilename, onSubmitted }:
   const seek = (t: number) => {
     const v = videoRef.current;
     if (!v) return;
-    v.currentTime = Math.max(0, Math.min(duration || t, t));
+    const target = Math.max(0, Math.min(duration || t, t));
+    v.currentTime = target;
+    setCurrentTime(target);
   };
+
+  const seekAndPlay = (t: number) => {
+    const v = videoRef.current;
+    if (!v) return;
+    seek(t);
+    v.play().catch(() => { /* autoplay may be blocked, ignore */ });
+  };
+
+  // Click + drag scrubbing on the timeline strip.
+  const timelineRef = useRef<HTMLDivElement>(null);
+  const draggingRef = useRef(false);
+
+  const seekFromClientX = (clientX: number) => {
+    const el = timelineRef.current;
+    if (!el || duration <= 0) return;
+    const rect = el.getBoundingClientRect();
+    const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    seek(ratio * duration);
+  };
+
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      if (draggingRef.current) seekFromClientX(e.clientX);
+    };
+    const onUp = () => { draggingRef.current = false; };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [duration]);
 
   const handleMark = () => {
     if (markStart === null) {
@@ -114,8 +149,9 @@ export default function ClipSelector({ projectId, sourceFilename, onSubmitted }:
     <div className="card">
       <h2 className="mb-2 text-lg font-semibold">Pick your clips</h2>
       <p className="mb-4 text-sm text-[#888]">
-        Scrub through the video and tap <span className="text-[#ededed]">Mark in</span> at the start, then{" "}
-        <span className="text-[#ededed]">Mark out</span> at the end. Repeat for as many clips as you like, then submit.
+        Drag the slider or timeline to jump anywhere in the video, then tap{" "}
+        <span className="text-[#ededed]">Mark in</span> at the start of a moment and{" "}
+        <span className="text-[#ededed]">Mark out</span> at the end. Repeat for as many clips as you like.
       </p>
 
       {/* Video player */}
@@ -129,8 +165,30 @@ export default function ClipSelector({ projectId, sourceFilename, onSubmitted }:
         />
       </div>
 
-      {/* Timeline with current marker + in-progress range overlay */}
-      <div className="relative mb-3 h-3 w-full rounded-full bg-[#1f1f1f]">
+      {/* Scrub slider — instant, no need to watch the video */}
+      {duration > 0 && (
+        <div className="mb-3">
+          <input
+            type="range"
+            min={0}
+            max={duration}
+            step={0.1}
+            value={currentTime}
+            onChange={(e) => seek(parseFloat(e.target.value))}
+            className="w-full accent-[#6d5dfc] cursor-pointer"
+          />
+        </div>
+      )}
+
+      {/* Timeline with committed ranges + in-progress range overlay (click/drag to scrub) */}
+      <div
+        ref={timelineRef}
+        onMouseDown={(e) => {
+          draggingRef.current = true;
+          seekFromClientX(e.clientX);
+        }}
+        className="relative mb-3 h-4 w-full cursor-pointer rounded-full bg-[#1f1f1f] hover:h-5 transition-all"
+      >
         {/* All committed ranges */}
         {duration > 0 &&
           ranges.map((r, i) => (
@@ -154,7 +212,7 @@ export default function ClipSelector({ projectId, sourceFilename, onSubmitted }:
         {/* Playhead */}
         {duration > 0 && (
           <div
-            className="absolute top-[-3px] h-[18px] w-[2px] bg-[#ededed]"
+            className="pointer-events-none absolute top-[-4px] h-[24px] w-[3px] rounded-full bg-[#ededed] shadow"
             style={{ left: `${(currentTime / duration) * 100}%` }}
           />
         )}
@@ -189,7 +247,20 @@ export default function ClipSelector({ projectId, sourceFilename, onSubmitted }:
       {/* Selected ranges list */}
       {ranges.length > 0 && (
         <div className="mb-4 space-y-2">
-          <p className="text-sm font-medium text-[#ededed]">{ranges.length} clip(s) selected</p>
+          <div className="flex items-center justify-between">
+            <p className="text-sm font-medium text-[#ededed]">{ranges.length} clip(s) selected</p>
+            <button
+              type="button"
+              onClick={() => {
+                setRanges([]);
+                setMarkStart(null);
+                setError("");
+              }}
+              className="text-xs text-red-400 hover:text-red-300"
+            >
+              ↻ Clear all
+            </button>
+          </div>
           {ranges.map((r, i) => (
             <div key={i} className="flex items-center gap-2 rounded-lg bg-[#161616] px-3 py-2 text-sm">
               <span className="font-mono text-[#6d5dfc]">#{i + 1}</span>
@@ -209,7 +280,7 @@ export default function ClipSelector({ projectId, sourceFilename, onSubmitted }:
                 className="w-20 rounded bg-[#0d0d0d] px-2 py-1 text-xs"
               />
               <span className="text-xs text-[#888]">{(r.end - r.start).toFixed(1)}s</span>
-              <button type="button" onClick={() => seek(r.start)} className="ml-auto text-xs text-[#888] hover:text-[#ededed]">
+              <button type="button" onClick={() => seekAndPlay(r.start)} className="ml-auto text-xs text-[#888] hover:text-[#ededed]">
                 ▶ preview
               </button>
               <button type="button" onClick={() => removeRange(i)} className="text-xs text-red-400 hover:text-red-300">
