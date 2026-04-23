@@ -44,9 +44,13 @@ export default function Dashboard() {
     return () => clearInterval(timer);
   }, [projects, fetchProjects]);
 
-  const handleUpload = async (file?: File, url?: string) => {
-    const project = await uploadVideo(file, url);
+  const handleUpload = async (file?: File, url?: string, manualSelect?: boolean) => {
+    const project = await uploadVideo(file, url, manualSelect);
     setProjects((prev) => [project, ...prev]);
+    // If the user opted to pick clips manually, jump straight to the project page.
+    if (manualSelect) {
+      router.push(`/project/${project.id}`);
+    }
   };
 
   const handleDelete = async (id: string) => {

@@ -187,9 +187,46 @@ async def run_pipeline(project_id: str):
             await _update_progress(db, project, 55, "Detecting viral moments",
                                    f"Scoring {len(chunks)} segments...")
 
-            top_clips = await asyncio.to_thread(
-                detect_clips, chunks, 5, 20.0, 60.0, project.transcript or ""
-            )
+            # Honor user-supplied manual selections (skip auto-detection).
+            top_clips: list[dict] = []
+            if project.manual_selections:
+                try:
+                    user_ranges = json.loads(project.manual_selections)
+                except Exception:
+                    user_ranges = []
+                video_dur = project.duration or get_video_duration(video_path)
+                for r in user_ranges:
+                    s = max(0.0, float(r["start"]))
+                    e = min(video_dur, float(r["end"]))
+                    if e <= s:
+                        continue
+                    seg_chunks = [c for c in chunks if c["start"] >= s and c["end"] <= e]
+                    text = " ".join(c["text"] for c in seg_chunks).strip() or ""
+                    top_clips.append({
+                        "start": s,
+                        "end": e,
+                        "text": text,
+                        "score": 100.0,  # user-picked = max priority
+                        "title": None,   # let content_generator pick a title
+                    })
+                # Optional: rewrite hooks with the LLM for the user's picks too.
+                if top_clips:
+                    from app.services.clip_detection import rewrite_hook
+                    for clip in top_clips:
+                        if not clip["text"]:
+                            continue
+                        try:
+                            new_text = await asyncio.to_thread(rewrite_hook, clip["text"])
+                            if new_text and new_text != clip["text"]:
+                                clip["original_text"] = clip["text"]
+                                clip["text"] = new_text
+                        except Exception:
+                            pass
+                    logger.info(f"[{project_id}] Using {len(top_clips)} user-picked clips")
+            else:
+                top_clips = await asyncio.to_thread(
+                    detect_clips, chunks, 5, 20.0, 60.0, project.transcript or ""
+                )
             if not top_clips:
                 project.status = "failed"
                 project.progress_stage = "No clips detected"

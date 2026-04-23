@@ -6,6 +6,7 @@ import { useEffect, useState, useCallback } from "react";
 import { getProject, Project } from "@/lib/api";
 import Navbar from "@/components/Navbar";
 import ClipCard from "@/components/ClipCard";
+import ClipSelector from "@/components/ClipSelector";
 import ProcessingStatus from "@/components/ProcessingStatus";
 
 export default function ProjectPage() {
@@ -37,9 +38,10 @@ export default function ProjectPage() {
     if (user) fetchProject();
   }, [user, fetchProject]);
 
-  // Poll while processing
+  // Poll while processing (but not while waiting for the user to pick clips).
   useEffect(() => {
-    if (!project || ["done", "failed"].includes(project.status)) return;
+    if (!project) return;
+    if (["done", "failed", "pending_selection"].includes(project.status)) return;
     const timer = setInterval(fetchProject, 4000);
     return () => clearInterval(timer);
   }, [project, fetchProject]);
@@ -98,8 +100,17 @@ export default function ProjectPage() {
           </div>
         </div>
 
+        {/* Manual clip selection */}
+        {project.status === "pending_selection" && project.source_filename && (
+          <ClipSelector
+            projectId={project.id}
+            sourceFilename={project.source_filename}
+            onSubmitted={fetchProject}
+          />
+        )}
+
         {/* Processing State */}
-        {!["done", "failed"].includes(project.status) && (
+        {!(["done", "failed", "pending_selection"].includes(project.status)) && (
           <ProcessingStatus
             status={project.status}
             progressPct={project.progress_pct}
@@ -146,11 +157,12 @@ export default function ProjectPage() {
 function StatusBadge({ status }: { status: string }) {
   const map: Record<string, string> = {
     pending: "badge-pending",
+    pending_selection: "badge-pending",
     transcribing: "badge-processing",
     detecting: "badge-processing",
     processing: "badge-processing",
     done: "badge-done",
     failed: "badge-failed",
   };
-  return <span className={`badge ${map[status] || "badge-pending"}`}>{status}</span>;
+  return <span className={`badge ${map[status] || "badge-pending"}`}>{status.replace("_", " ")}</span>;
 }

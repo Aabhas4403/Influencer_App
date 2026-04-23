@@ -83,6 +83,8 @@ export interface Project {
   progress_detail: string | null;
   eta_seconds: number | null;
   language: string | null;
+  source_filename: string | null;
+  manual_selections: string | null;
   created_at: string;
   clips: Clip[];
 }
@@ -105,14 +107,25 @@ export interface Clip {
   created_at: string;
 }
 
-export function uploadVideo(file?: File, videoUrl?: string) {
+export function uploadVideo(file?: File, videoUrl?: string, manualSelect?: boolean) {
   const form = new FormData();
   if (file) form.append("file", file);
   if (videoUrl) form.append("video_url", videoUrl);
+  if (manualSelect) form.append("manual_select", "true");
 
   return request<Project>("/projects/upload", {
     method: "POST",
     body: form,
+  });
+}
+
+export function submitSelections(
+  projectId: string,
+  ranges: { start: number; end: number }[]
+) {
+  return request<Project>(`/projects/${projectId}/selections`, {
+    method: "POST",
+    body: JSON.stringify({ ranges }),
   });
 }
 

@@ -3,13 +3,14 @@
 import { useState, useRef } from "react";
 
 interface Props {
-  onUpload: (file?: File, url?: string) => Promise<void>;
+  onUpload: (file?: File, url?: string, manualSelect?: boolean) => Promise<void>;
 }
 
 export default function UploadForm({ onUpload }: Props) {
   const [mode, setMode] = useState<"file" | "url">("file");
   const [url, setUrl] = useState("");
   const [file, setFile] = useState<File | null>(null);
+  const [manualSelect, setManualSelect] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
@@ -20,9 +21,9 @@ export default function UploadForm({ onUpload }: Props) {
     setUploading(true);
     try {
       if (mode === "file" && file) {
-        await onUpload(file, undefined);
+        await onUpload(file, undefined, manualSelect);
       } else if (mode === "url" && url) {
-        await onUpload(undefined, url);
+        await onUpload(undefined, url, manualSelect);
       }
       setFile(null);
       setUrl("");
@@ -92,6 +93,21 @@ export default function UploadForm({ onUpload }: Props) {
 
         {error && <p className="text-sm text-red-500">{error}</p>}
 
+        <label className="flex items-start gap-2 text-sm text-[#aaa] cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={manualSelect}
+            onChange={(e) => setManualSelect(e.target.checked)}
+            className="mt-0.5 h-4 w-4 accent-[#6d5dfc]"
+          />
+          <span>
+            <span className="text-[#ededed]">Pick clip moments manually</span>
+            <span className="block text-xs text-[#777]">
+              After upload you can scrub through the video and pick the exact ranges to turn into clips. Skips auto-detection.
+            </span>
+          </span>
+        </label>
+
         <button
           type="submit"
           disabled={uploading || (mode === "file" ? !file : !url)}
@@ -100,8 +116,10 @@ export default function UploadForm({ onUpload }: Props) {
           {uploading ? (
             <span className="flex items-center gap-2">
               <span className="animate-spin h-4 w-4 border-2 border-white border-t-transparent rounded-full" />
-              Processing...
+              {manualSelect ? "Uploading..." : "Processing..."}
             </span>
+          ) : manualSelect ? (
+            "\u2702\ufe0f Upload & pick clips"
           ) : (
             "🚀 Start Processing"
           )}

@@ -45,10 +45,21 @@ class Project(Base):
     # Caching
     video_hash = Column(String(64), nullable=True, index=True)  # SHA256 of video URL or file
     language = Column(String(20), nullable=True)        # detected language
+    # Manual clip selection — JSON list of [{"start": float, "end": float}]
+    # When set, the pipeline skips auto-detection and uses these ranges as the clips.
+    manual_selections = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", back_populates="projects")
     clips = relationship("Clip", back_populates="project", cascade="all, delete")
+
+    @property
+    def source_filename(self) -> str | None:
+        """Basename of the uploaded video file, for client-side preview via /uploads/<filename>."""
+        if not self.video_path:
+            return None
+        from pathlib import Path
+        return Path(self.video_path).name
 
 
 class Clip(Base):

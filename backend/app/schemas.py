@@ -87,11 +87,23 @@ class ProjectOut(BaseModel):
     progress_detail: Optional[str] = ""
     eta_seconds: Optional[int] = None
     language: Optional[str] = None
+    # Filename only (e.g. "abc.mp4") so the frontend can play /uploads/<source_filename>
+    source_filename: Optional[str] = None
+    manual_selections: Optional[str] = None
     created_at: datetime
     clips: List[ClipOut] = []
 
     class Config:
         from_attributes = True
+
+
+class SelectionRange(BaseModel):
+    start: float
+    end: float
+
+
+class SelectionsRequest(BaseModel):
+    ranges: List[SelectionRange]
 
 
 # Fix forward references

@@ -14,7 +14,7 @@ from app.auth import get_current_user
 from app.config import UPLOAD_DIR
 from app.database import get_db
 from app.models import User, Project, Clip
-from app.schemas import ProjectOut
+from app.schemas import ProjectOut, SelectionsRequest
 from app.services.pipeline import run_pipeline
 
 router = APIRouter()
@@ -25,10 +25,16 @@ async def upload_video(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(None),
     video_url: str = Form(None),
+    manual_select: bool = Form(False),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Upload a video file or provide a YouTube URL, then start the pipeline."""
+    """Upload a video file or provide a YouTube URL, then start the pipeline.
+
+    If `manual_select=true`, the project is left in `pending_selection` status
+    after the source video is ready. The user must then POST clip ranges to
+    `/projects/{id}/selections` to kick off the rest of the pipeline.
+    """
     if not file and not video_url:
         raise HTTPException(status_code=400, detail="Provide a file or video_url")
 
@@ -63,7 +69,7 @@ async def upload_video(
             raise HTTPException(status_code=500, detail="yt-dlp not installed. Run: pip install yt-dlp")
         project.video_path = str(dest)
 
-    project.status = "pending"
+    project.status = "pending_selection" if manual_select else "pending"
     db.add(project)
     await db.commit()
 
@@ -75,8 +81,9 @@ async def upload_video(
     )
     project = result.scalar_one()
 
-    # Start background processing
-    background_tasks.add_task(run_pipeline, str(project.id))
+    # Start background processing only if the user is not selecting clips manually
+    if not manual_select:
+        background_tasks.add_task(run_pipeline, str(project.id))
 
     return project
 
@@ -157,3 +164,52 @@ async def reprocess_project(
 
     background_tasks.add_task(run_pipeline, str(project.id))
     return {"status": "reprocessing"}
+
+
+@router.post("/{project_id}/selections", response_model=ProjectOut)
+async def submit_selections(
+    project_id: str,
+    payload: SelectionsRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Persist the user-picked clip ranges and kick off the pipeline.
+
+    Validates ranges (start < end, non-empty, no duplicates) and stores them as
+    JSON on the project. The pipeline will then bypass auto-detection and use
+    these ranges directly.
+    """
+    import json
+    result = await db.execute(
+        select(Project).where(Project.id == project_id, Project.user_id == user.id)
+    )
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if not payload.ranges:
+        raise HTTPException(status_code=400, detail="At least one selection is required")
+
+    cleaned: list[dict] = []
+    for r in payload.ranges:
+        if r.end <= r.start:
+            raise HTTPException(status_code=400, detail=f"Invalid range: end must be greater than start (got {r.start}-{r.end})")
+        if r.end - r.start < 2:
+            raise HTTPException(status_code=400, detail=f"Selection too short ({r.end - r.start:.1f}s); minimum 2s")
+        cleaned.append({"start": float(r.start), "end": float(r.end)})
+
+    cleaned.sort(key=lambda x: x["start"])
+    project.manual_selections = json.dumps(cleaned)
+    project.status = "pending"
+    await db.commit()
+
+    background_tasks.add_task(run_pipeline, str(project.id))
+
+    # Re-fetch with clips eagerly loaded
+    result = await db.execute(
+        select(Project)
+        .where(Project.id == project.id)
+        .options(selectinload(Project.clips).selectinload(Clip.versions))
+    )
+    return result.scalar_one()
