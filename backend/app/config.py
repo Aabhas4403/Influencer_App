@@ -66,6 +66,11 @@ CTA_ENDCARD = os.getenv("CTA_ENDCARD", "true").lower() == "true"
 CTA_TEXT = os.getenv("CTA_TEXT", "FOLLOW FOR MORE")
 # Smooth speaker tracking (per-second face track w/ EMA) instead of one-shot crop
 SMOOTH_SPEAKER_TRACK = os.getenv("SMOOTH_SPEAKER_TRACK", "true").lower() == "true"
+# Trim long silent gaps from each clip (tightens pacing, influencer-style)
+TRIM_SILENCES = os.getenv("TRIM_SILENCES", "false").lower() == "true"
+SILENCE_THRESHOLD_DB = float(os.getenv("SILENCE_THRESHOLD_DB", "-30"))
+SILENCE_MIN_DURATION = float(os.getenv("SILENCE_MIN_DURATION", "0.5"))
+SILENCE_PADDING = float(os.getenv("SILENCE_PADDING", "0.1"))
 
 # ---------- Cors ----------
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")

@@ -24,6 +24,7 @@ from app.config import (
     FFMPEG_PATH, BASE_DIR,
     CAPTION_STYLE, WORD_POP_CAPTIONS, PUNCH_ZOOMS,
     HOOK_INTRO, CTA_ENDCARD, CTA_TEXT, SMOOTH_SPEAKER_TRACK,
+    TRIM_SILENCES, SILENCE_THRESHOLD_DB, SILENCE_MIN_DURATION, SILENCE_PADDING,
 )
 from app.services import editing
 from app.services.editing import (
@@ -31,6 +32,7 @@ from app.services.editing import (
     track_speaker, smooth_track, build_pan_crop_filter,
     extract_audio_energy, find_emphasis_times, build_zoompan_expression,
     get_caption_style, group_words_into_chunks, generate_overlay_video,
+    trim_silences,
 )
 
 logger = logging.getLogger(__name__)
@@ -284,9 +286,27 @@ def process_clip(
 
     os.replace(base_clip, final_clip)
 
+    # ── Step 4: Trim long silent gaps (optional, tightens pacing) ──
+    if TRIM_SILENCES:
+        trimmed = str(out / f"_trimmed_{clip_index}{suffix}.mp4")
+        try:
+            if trim_silences(
+                final_clip, trimmed,
+                threshold_db=SILENCE_THRESHOLD_DB,
+                min_duration=SILENCE_MIN_DURATION,
+                padding=SILENCE_PADDING,
+            ):
+                os.replace(trimmed, final_clip)
+            else:
+                Path(trimmed).unlink(missing_ok=True)
+        except Exception as e:
+            logger.warning(f"Clip {clip_index}: silence trim skipped ({e})")
+            Path(trimmed).unlink(missing_ok=True)
+
     # Cleanup leftovers
     for pat in [f"_base_{clip_index}*", f"_overlay_{clip_index}*",
-                f"_overlaid_{clip_index}*", f"_music_{clip_index}*"]:
+                f"_overlaid_{clip_index}*", f"_music_{clip_index}*",
+                f"_trimmed_{clip_index}*"]:
         for f in out.glob(pat):
             f.unlink(missing_ok=True)
 

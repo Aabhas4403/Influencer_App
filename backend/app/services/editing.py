@@ -137,6 +137,100 @@ def get_duration(video_path: str) -> float:
         return 0.0
 
 
+# ─────────────────────────── Silence trimming ───────────────────────────
+
+def detect_silences(
+    input_path: str,
+    threshold_db: float = -30.0,
+    min_duration: float = 0.5,
+) -> List[Tuple[float, float]]:
+    """Run FFmpeg `silencedetect` and return list of (start, end) silent ranges (seconds)."""
+    cmd = [
+        FFMPEG_PATH, "-hide_banner", "-nostats", "-i", input_path,
+        "-af", f"silencedetect=noise={threshold_db}dB:d={min_duration}",
+        "-f", "null", "-",
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    silences: List[Tuple[float, float]] = []
+    cur_start: Optional[float] = None
+    for line in r.stderr.splitlines():
+        if "silence_start:" in line:
+            try:
+                cur_start = float(line.split("silence_start:")[1].strip().split()[0])
+            except Exception:
+                cur_start = None
+        elif "silence_end:" in line and cur_start is not None:
+            try:
+                tok = line.split("silence_end:")[1].strip().split()[0].rstrip(",")
+                silences.append((cur_start, float(tok)))
+            except Exception:
+                pass
+            cur_start = None
+    return silences
+
+
+def trim_silences(
+    input_path: str,
+    output_path: str,
+    threshold_db: float = -30.0,
+    min_duration: float = 0.5,
+    padding: float = 0.1,
+) -> bool:
+    """Remove silent ranges from a video, keeping `padding` seconds around speech.
+
+    Re-encodes audio+video together using FFmpeg `select`/`aselect` filters so
+    A/V stays in sync. Returns True if any silence was removed.
+    """
+    duration = get_duration(input_path)
+    if duration <= 0:
+        return False
+    silences = detect_silences(input_path, threshold_db, min_duration)
+    if not silences:
+        return False
+
+    # Build keep ranges (inverse of silence ranges, expanded by padding).
+    keep: List[Tuple[float, float]] = []
+    cursor = 0.0
+    for s, e in silences:
+        keep_end = min(duration, s + padding)
+        if keep_end > cursor:
+            keep.append((cursor, keep_end))
+        cursor = max(cursor, e - padding)
+    if cursor < duration:
+        keep.append((cursor, duration))
+
+    # Drop sub-frame ranges
+    keep = [(s, e) for s, e in keep if e - s > 0.05]
+    if not keep:
+        return False
+
+    # Bail if there's nothing meaningful to remove (<5% reduction)
+    kept_dur = sum(e - s for s, e in keep)
+    if kept_dur >= duration * 0.95:
+        return False
+
+    expr = "+".join(f"between(t,{s:.3f},{e:.3f})" for s, e in keep)
+    vf = f"select='{expr}',setpts=N/FRAME_RATE/TB"
+    af = f"aselect='{expr}',asetpts=N/SR/TB"
+
+    cmd = [
+        FFMPEG_PATH, "-y", "-i", input_path,
+        "-vf", vf, "-af", af,
+        "-c:v", "libx264", "-preset", "fast", "-crf", "21",
+        "-c:a", "aac", "-b:a", "128k",
+        output_path,
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        logger.warning(f"trim_silences failed: {r.stderr[-300:]}")
+        return False
+    logger.info(
+        f"trim_silences: {duration:.2f}s → {kept_dur:.2f}s "
+        f"({len(silences)} silent gaps removed)"
+    )
+    return True
+
+
 # ─────────────────────────── Speaker tracking ───────────────────────────
 
 _face_cascade = None
