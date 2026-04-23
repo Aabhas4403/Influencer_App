@@ -83,6 +83,7 @@ async def _copy_from_cache(db, project, cached: Project):
             start_time=clip.start_time,
             end_time=clip.end_time,
             score=clip.score,
+            score_features=clip.score_features,
             title=clip.title,
             transcript_text=clip.transcript_text,
             video_path=clip.video_path,
@@ -297,6 +298,10 @@ async def run_pipeline(project_id: str):
                     start_time=clip_data["start"],
                     end_time=clip_data["end"],
                     score=clip_data["score"],
+                    score_features=(
+                        json.dumps(clip_data["features"])
+                        if clip_data.get("features") else None
+                    ),
                     title=clip_data.get("title", f"Clip {i + 1}"),
                     transcript_text=clip_data["text"],
                     video_path=final_path,

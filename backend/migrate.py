@@ -29,6 +29,7 @@ MIGRATIONS = [
     )""",
     "CREATE INDEX IF NOT EXISTS ix_projects_video_hash ON projects(video_hash)",
     "ALTER TABLE projects ADD COLUMN manual_selections TEXT",
+    "ALTER TABLE clips ADD COLUMN score_features TEXT",
 ]
 
 def main():

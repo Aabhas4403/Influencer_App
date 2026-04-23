@@ -71,6 +71,9 @@ TRIM_SILENCES = os.getenv("TRIM_SILENCES", "false").lower() == "true"
 SILENCE_THRESHOLD_DB = float(os.getenv("SILENCE_THRESHOLD_DB", "-30"))
 SILENCE_MIN_DURATION = float(os.getenv("SILENCE_MIN_DURATION", "0.5"))
 SILENCE_PADDING = float(os.getenv("SILENCE_PADDING", "0.1"))
+# Trim filler words ("um", "uh", "matlab", "you know"...) using word-level timestamps
+TRIM_FILLER_WORDS = os.getenv("TRIM_FILLER_WORDS", "true").lower() == "true"
+FILLER_PAD_MS = int(os.getenv("FILLER_PAD_MS", "40"))  # tighten cuts a touch around each filler
 
 # ---------- Cors ----------
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")

@@ -71,6 +71,9 @@ class Clip(Base):
     start_time = Column(Float, nullable=False)
     end_time = Column(Float, nullable=False)
     score = Column(Float, default=0)
+    # JSON dump of the per-feature breakdown that produced `score` (keyword,
+    # emotion, rate, pause, structure, llm). Surfaced in the UI as "Why this clip?".
+    score_features = Column(Text, nullable=True)
     title = Column(String(255), nullable=True)
     transcript_text = Column(Text, nullable=True)
     video_path = Column(Text, nullable=True)

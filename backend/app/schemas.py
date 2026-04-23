@@ -52,6 +52,7 @@ class ClipOut(BaseModel):
     start_time: float
     end_time: float
     score: float
+    score_features: Optional[str] = None  # JSON string of feature breakdown
     title: Optional[str]
     transcript_text: Optional[str]
     video_path: Optional[str]

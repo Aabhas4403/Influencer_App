@@ -232,6 +232,130 @@ def trim_silences(
     return True
 
 
+# ─────────────────────────── Filler-word jump cuts ───────────────────────────
+
+# Single-token fillers (English + Hindi/Hinglish/common). Matched after stripping
+# punctuation and lowercasing. Multi-word phrases are handled separately.
+FILLER_WORDS_SINGLE = {
+    # English
+    "um", "umm", "uh", "uhh", "uhm", "er", "err", "ah", "ahh", "eh", "hmm", "hm",
+    "like", "literally", "basically", "actually", "honestly",
+    # Hindi / Hinglish discourse fillers
+    "matlab", "yaani", "yani", "haan", "han", "haa", "achha", "achchha",
+    "toh", "to", "bhai", "yaar", "arre", "are", "arrey",
+    # Devanagari spellings
+    "मतलब", "यानी", "हाँ", "हां", "अच्छा", "तो", "भाई", "यार", "अरे",
+}
+
+# Multi-word filler phrases (lowercase, space-separated). Matched against
+# windows of consecutive words.
+FILLER_PHRASES = [
+    ("you", "know"),
+    ("i", "mean"),
+    ("sort", "of"),
+    ("kind", "of"),
+    ("aap", "jaante", "hain"),
+    ("samajh", "rahe", "ho"),
+]
+
+
+def _normalize_word(w: str) -> str:
+    """Lowercase + strip surrounding punctuation (keeps Devanagari intact)."""
+    return re.sub(r"^[\W_]+|[\W_]+$", "", w.lower(), flags=re.UNICODE)
+
+
+def find_filler_ranges(words: List[Dict], pad_ms: int = 40) -> List[Tuple[float, float]]:
+    """Return (start, end) ranges (seconds, relative to the words' own time base)
+    that should be cut as filler. Adjacent ranges are merged."""
+    if not words:
+        return []
+    pad = pad_ms / 1000.0
+    norm = [_normalize_word(w["word"]) for w in words]
+    raw: List[Tuple[float, float]] = []
+    n = len(words)
+    i = 0
+    while i < n:
+        # Try multi-word phrase first
+        matched = False
+        for phrase in FILLER_PHRASES:
+            L = len(phrase)
+            if i + L <= n and tuple(norm[i:i + L]) == phrase:
+                start = max(0.0, words[i]["start"] - pad)
+                end = words[i + L - 1]["end"] + pad
+                raw.append((start, end))
+                i += L
+                matched = True
+                break
+        if matched:
+            continue
+        if norm[i] in FILLER_WORDS_SINGLE:
+            start = max(0.0, words[i]["start"] - pad)
+            end = words[i]["end"] + pad
+            raw.append((start, end))
+        i += 1
+
+    if not raw:
+        return []
+
+    # Merge overlapping / touching ranges
+    raw.sort()
+    merged: List[Tuple[float, float]] = [raw[0]]
+    for s, e in raw[1:]:
+        ls, le = merged[-1]
+        if s <= le + 0.05:
+            merged[-1] = (ls, max(le, e))
+        else:
+            merged.append((s, e))
+    return merged
+
+
+def trim_ranges(input_path: str, output_path: str, drop_ranges: List[Tuple[float, float]]) -> bool:
+    """Drop arbitrary (start, end) ranges from a video, re-encoding to keep A/V in sync."""
+    duration = get_duration(input_path)
+    if duration <= 0 or not drop_ranges:
+        return False
+
+    # Build keep ranges (inverse of drop, clipped to duration)
+    drop_clipped = [(max(0.0, s), min(duration, e)) for s, e in drop_ranges if e > s]
+    drop_clipped.sort()
+    keep: List[Tuple[float, float]] = []
+    cursor = 0.0
+    for s, e in drop_clipped:
+        if s > cursor:
+            keep.append((cursor, s))
+        cursor = max(cursor, e)
+    if cursor < duration:
+        keep.append((cursor, duration))
+    keep = [(s, e) for s, e in keep if e - s > 0.05]
+    if not keep:
+        return False
+
+    kept_dur = sum(e - s for s, e in keep)
+    if kept_dur >= duration * 0.99:  # less than 1% trimmed → not worth re-encoding
+        return False
+
+    expr = "+".join(f"between(t,{s:.3f},{e:.3f})" for s, e in keep)
+    vf = f"select='{expr}',setpts=N/FRAME_RATE/TB"
+    af = f"aselect='{expr}',asetpts=N/SR/TB"
+
+    cmd = [
+        FFMPEG_PATH, "-y", "-i", input_path,
+        "-vf", vf, "-af", af,
+        "-c:v", "libx264", "-preset", "fast", "-crf", "21",
+        "-c:a", "aac", "-b:a", "128k",
+        output_path,
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        logger.warning(f"trim_ranges failed: {r.stderr[-300:]}")
+        return False
+    logger.info(
+        f"trim_ranges: {duration:.2f}s → {kept_dur:.2f}s "
+        f"({len(drop_clipped)} ranges removed)"
+    )
+    return True
+
+
 # ─────────────────────────── Speaker tracking ───────────────────────────
 
 _face_cascade = None

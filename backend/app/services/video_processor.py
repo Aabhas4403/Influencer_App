@@ -25,6 +25,7 @@ from app.config import (
     CAPTION_STYLE, WORD_POP_CAPTIONS, PUNCH_ZOOMS,
     HOOK_INTRO, CTA_ENDCARD, CTA_TEXT, SMOOTH_SPEAKER_TRACK,
     TRIM_SILENCES, SILENCE_THRESHOLD_DB, SILENCE_MIN_DURATION, SILENCE_PADDING,
+    TRIM_FILLER_WORDS, FILLER_PAD_MS,
 )
 from app.services import editing
 from app.services.editing import (
@@ -33,6 +34,8 @@ from app.services.editing import (
     extract_audio_energy, find_emphasis_times, build_zoompan_expression,
     get_caption_style, group_words_into_chunks, generate_overlay_video,
     trim_silences,
+    find_filler_ranges,
+    trim_ranges,
 )
 
 logger = logging.getLogger(__name__)
@@ -286,7 +289,32 @@ def process_clip(
 
     os.replace(base_clip, final_clip)
 
-    # ── Step 4: Trim long silent gaps (optional, tightens pacing) ──
+    # ── Step 4a: Trim filler words ("um", "uh", "matlab"...) using word timestamps ──
+    if TRIM_FILLER_WORDS and word_timestamps:
+        # Re-base words to clip-relative time and find filler ranges.
+        rel_words = [
+            {"word": w["word"],
+             "start": max(0.0, w["start"] - start),
+             "end": max(0.0, w["end"] - start)}
+            for w in word_timestamps
+            if start <= w["start"] < end
+        ]
+        filler_ranges = find_filler_ranges(rel_words, pad_ms=FILLER_PAD_MS)
+        if filler_ranges:
+            cut_path = str(out / f"_filler_{clip_index}{suffix}.mp4")
+            try:
+                if trim_ranges(final_clip, cut_path, filler_ranges):
+                    os.replace(cut_path, final_clip)
+                    logger.info(
+                        f"Clip {clip_index}: filler-word jump cuts ({len(filler_ranges)} ranges removed)"
+                    )
+                else:
+                    Path(cut_path).unlink(missing_ok=True)
+            except Exception as e:
+                logger.warning(f"Clip {clip_index}: filler-word trim skipped ({e})")
+                Path(cut_path).unlink(missing_ok=True)
+
+    # ── Step 4b: Trim long silent gaps (optional, tightens pacing) ──
     if TRIM_SILENCES:
         trimmed = str(out / f"_trimmed_{clip_index}{suffix}.mp4")
         try:
@@ -306,7 +334,7 @@ def process_clip(
     # Cleanup leftovers
     for pat in [f"_base_{clip_index}*", f"_overlay_{clip_index}*",
                 f"_overlaid_{clip_index}*", f"_music_{clip_index}*",
-                f"_trimmed_{clip_index}*"]:
+                f"_trimmed_{clip_index}*", f"_filler_{clip_index}*"]:
         for f in out.glob(pat):
             f.unlink(missing_ok=True)
 

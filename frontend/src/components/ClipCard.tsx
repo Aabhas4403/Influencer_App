@@ -21,6 +21,16 @@ export default function ClipCard({ clip, index }: Props) {
   const [customPrompt, setCustomPrompt] = useState("");
   const [customizing, setCustomizing] = useState(false);
   const [showCustomize, setShowCustomize] = useState(false);
+  const [showWhy, setShowWhy] = useState(false);
+
+  let features: Record<string, number> | null = null;
+  if (data.score_features) {
+    try {
+      features = JSON.parse(data.score_features);
+    } catch {
+      features = null;
+    }
+  }
 
   const handleRegenerate = async () => {
     setRegenerating(true);
@@ -82,6 +92,14 @@ export default function ClipCard({ clip, index }: Props) {
             <span>
               {formatTime(data.start_time)} → {formatTime(data.end_time)}
             </span>
+            {features && (
+              <button
+                onClick={() => setShowWhy(!showWhy)}
+                className="text-xs text-[#6d5dfc] hover:underline"
+              >
+                {showWhy ? "Hide" : "Why this clip?"}
+              </button>
+            )}
           </div>
         </div>
 
@@ -168,6 +186,34 @@ export default function ClipCard({ clip, index }: Props) {
             >
               {customizing ? "Processing..." : "🚀 Run Changes"}
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Why this clip? — multi-signal score breakdown */}
+      {showWhy && features && (
+        <div className="mb-4 rounded-lg border border-[#6d5dfc]/20 bg-[#6d5dfc]/5 p-3">
+          <p className="mb-2 text-xs font-medium text-[#ededed]">
+            Why this clip? — multi-signal virality score
+          </p>
+          <div className="space-y-1.5">
+            {Object.entries(features).map(([k, v]) => {
+              const pct = Math.max(0, Math.min(1, v)) * 100;
+              return (
+                <div key={k} className="flex items-center gap-2 text-xs">
+                  <span className="w-20 shrink-0 capitalize text-[#888]">{k}</span>
+                  <div className="relative h-1.5 flex-1 overflow-hidden rounded-full bg-[#1f1f1f]">
+                    <div
+                      className="absolute left-0 top-0 h-full rounded-full bg-[#6d5dfc]"
+                      style={{ width: `${pct}%` }}
+                    />
+                  </div>
+                  <span className="w-10 shrink-0 text-right font-mono text-[#aaa]">
+                    {(v as number).toFixed(2)}
+                  </span>
+                </div>
+              );
+            })}
           </div>
         </div>
       )}
