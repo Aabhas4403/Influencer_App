@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 import subprocess
 import wave
 from dataclasses import dataclass
@@ -501,6 +502,31 @@ def get_caption_style(name: str) -> CaptionStyle:
     return CAPTION_PRESETS.get(name.lower(), CAPTION_PRESETS["hormozi"])
 
 
+# ─────────────── Important-word emphasis (v2) ──────────────────
+#
+# Even when not the "currently spoken" word, these words always render in the
+# style's highlight colour so the eye latches on to the punch line.
+
+IMPORTANT_WORDS = {
+    # english
+    "never", "always", "mistake", "secret", "truth", "wrong", "biggest",
+    "worst", "best", "nobody", "everyone", "stop", "huge", "shocking",
+    "crazy", "insane", "real", "honest", "honestly", "literally",
+    "actually", "obviously", "guarantee", "warning", "free",
+    # hindi / hinglish
+    "galat", "sahi", "sabse", "asli", "zaruri", "important",
+    "shocking", "kamaal", "pagal",
+}
+
+
+def _is_important_word(word: str) -> bool:
+    """True if `word` should always be visually emphasised."""
+    if not word:
+        return False
+    cleaned = re.sub(r"[^\w\u0900-\u097F]+", "", word).lower()
+    return cleaned in IMPORTANT_WORDS
+
+
 def group_words_into_chunks(words: List[Dict], words_per_chunk: int) -> List[Dict]:
     """Group flat word list into N-word chunks for caption display.
 
@@ -634,7 +660,10 @@ def render_word_pop_frame(
         x = (width - line_w_px) // 2
         for idx in line:
             is_active = (idx == active_idx)
-            color = style.highlight_color if is_active else style.primary_color
+            is_important = _is_important_word(words[idx]["word"])
+            # Active word always wins; otherwise important words also pop.
+            color = (style.highlight_color if (is_active or is_important)
+                     else style.primary_color)
             text = rendered[idx]
 
             if is_active and style.bounce and bounce_scale != 1.0:

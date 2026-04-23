@@ -318,7 +318,7 @@ Text:
 
 
 def hybrid_score(segments: List[Dict]) -> List[Dict]:
-    """Combine rule-based + LLM scoring for each segment."""
+    """Combine rule-based + LLM scoring for each segment (legacy)."""
     scored = []
     for seg in segments:
         r_score = rule_score(seg["text"])
@@ -340,6 +340,187 @@ def hybrid_score(segments: List[Dict]) -> List[Dict]:
 
         scored.append({**seg, "score": final_score, "title": title})
 
+    return scored
+
+
+# ─────────────── Multi-signal Virality Scoring (v2) ──────────────────
+#
+# Replaces the single-axis "rule + LLM" stack with a hybrid signal model
+# (Enhance.md). Each component returns a normalised 0..1 score; the final
+# virality is a weighted sum that automatically redistributes when LLM is
+# unavailable.
+
+# Emotional intensity vocabulary (English + Hindi/Hinglish)
+EMOTION_WORDS = [
+    # english
+    "crazy", "insane", "unbelievable", "shocking", "wild", "huge",
+    "worst", "best", "biggest", "never", "always", "nobody", "everyone",
+    "honestly", "literally", "actually", "seriously", "obviously",
+    "amazing", "terrible", "awful", "incredible", "ridiculous",
+    # hindi / hinglish
+    "pagal", "kamaal", "shaandaar", "bekaar", "galat", "sahi",
+    "sabse", "asli", "zaruri", "important", "shocking",
+]
+
+# High-impact viral hook PHRASES (whole clauses, not single words).
+HOOK_PATTERNS_V2 = [
+    r"you'?re doing .* wrong",
+    r"this is why .* (fail|don'?t work)",
+    r"nobody (tells you|talks about) (this|that)",
+    r"the (biggest|worst) mistake",
+    r"i wish i (had )?knew",
+    r"this changed (everything|my life)",
+    r"stop doing (this|that)",
+    r"if you'?re not .*",
+    r"the (real|hidden) reason",
+    r"most people don'?t (know|realize)",
+    # hindi/hinglish
+    r"sabse badi galti",
+    r"koi nahi batata",
+    r"asli wajah",
+    r"zindagi badal",
+    r"main ne seekha",
+]
+
+
+def _normalize(value: float, lo: float, hi: float) -> float:
+    if hi <= lo:
+        return 0.0
+    return max(0.0, min(1.0, (value - lo) / (hi - lo)))
+
+
+def emotion_intensity(text: str) -> float:
+    """0..1 — density of emotional words."""
+    if not text:
+        return 0.0
+    text_lower = text.lower()
+    word_count = max(len(text.split()), 1)
+    hits = sum(1 for w in EMOTION_WORDS if w in text_lower)
+    density = hits / max(word_count / 30, 1.0)  # ~3 hits per 30-word seg ≈ 1.0
+    return min(density, 1.0)
+
+
+def keyword_intensity(text: str) -> float:
+    """0..1 — viral pattern matches + hook keyword density."""
+    if not text:
+        return 0.0
+    text_lower = text.lower()
+    pattern_hits = sum(1 for p in HOOK_PATTERNS_V2 if re.search(p, text_lower))
+    keyword_hits = sum(1 for kw in HOOK_KEYWORDS if kw in text_lower)
+    raw = pattern_hits * 3 + keyword_hits  # patterns weigh 3x
+    return _normalize(raw, 0, 8)
+
+
+def structural_strength(text: str) -> float:
+    """0..1 — length sweet-spot + numbered lists + question/excl marks."""
+    if not text:
+        return 0.0
+    word_count = len(text.split())
+    text_lower = text.lower()
+    score = 0.0
+    if 30 <= word_count <= 90:
+        score += 0.4
+    elif 20 <= word_count <= 120:
+        score += 0.2
+    if re.search(r"\d+\s+(mistakes?|tips?|reasons?|ways?|things?|steps?|secrets?|hacks?|rules?)",
+                 text_lower):
+        score += 0.3
+    if "?" in text:
+        score += 0.15
+    if "!" in text:
+        score += 0.15
+    return min(score, 1.0)
+
+
+def speech_rate_change(text: str, duration: float, baseline_wpm: float = 150.0) -> float:
+    """0..1 — pace deviation from baseline (faster excitement OR dramatic slow)."""
+    if duration <= 0 or not text:
+        return 0.0
+    wpm = (len(text.split()) / duration) * 60.0
+    delta = abs(wpm - baseline_wpm) / baseline_wpm
+    return _normalize(delta, 0.10, 0.60)
+
+
+def pause_score(chunks_in_segment: List[Dict], min_pause: float = 0.4) -> float:
+    """0..1 — count of dramatic pauses (>=min_pause s) inside the segment."""
+    if not chunks_in_segment or len(chunks_in_segment) < 2:
+        return 0.0
+    pauses = sum(
+        1 for prev, nxt in zip(chunks_in_segment, chunks_in_segment[1:])
+        if (nxt.get("start", 0) - prev.get("end", 0)) >= min_pause
+    )
+    return _normalize(pauses, 0, 5)
+
+
+# Tunable weight stack — sums to 1.0 when LLM is available.
+VIRAL_WEIGHTS = {
+    "keyword":   0.22,
+    "emotion":   0.18,
+    "rate":      0.12,
+    "pause":     0.08,
+    "structure": 0.15,
+    "llm":       0.25,
+}
+
+
+def compute_virality(
+    seg: Dict,
+    seg_chunks: List[Dict],
+    llm_norm: Optional[float],
+) -> Dict:
+    """Multi-signal virality features + weighted 0..1 score."""
+    text = seg.get("text", "")
+    duration = max(seg.get("end", 0) - seg.get("start", 0), 0.001)
+
+    feats = {
+        "keyword":   keyword_intensity(text),
+        "emotion":   emotion_intensity(text),
+        "rate":      speech_rate_change(text, duration),
+        "pause":     pause_score(seg_chunks),
+        "structure": structural_strength(text),
+        "llm":       llm_norm if llm_norm is not None else 0.0,
+    }
+
+    weights = dict(VIRAL_WEIGHTS)
+    if llm_norm is None:
+        # Redistribute LLM's weight across the other signals
+        bump = weights.pop("llm") / len(weights)
+        for k in weights:
+            weights[k] += bump
+        feats.pop("llm", None)
+
+    score = sum(feats[k] * weights[k] for k in feats)
+    return {"score": score, "features": feats}
+
+
+def hybrid_score_v2(segments: List[Dict], all_chunks: List[Dict]) -> List[Dict]:
+    """Drop-in replacement for `hybrid_score()` with multi-signal scoring.
+
+    Each returned segment gets `score` (0..100) and `features` (per-signal 0..1).
+    """
+    scored = []
+    for seg in segments:
+        seg_chunks = [
+            c for c in all_chunks
+            if c.get("start", 0) >= seg["start"] and c.get("end", 0) <= seg["end"]
+        ]
+
+        llm_result = llm_score(seg["text"])
+        llm_norm = (llm_result["score"] / 10.0) if llm_result else None
+        title = (llm_result.get("title") if llm_result else "") or seg.get("title", "")
+
+        v = compute_virality(seg, seg_chunks, llm_norm)
+
+        if not title:
+            words = seg["text"].split()
+            title = " ".join(words[:8]) + ("…" if len(words) > 8 else "")
+
+        scored.append({
+            **seg,
+            "score": v["score"] * 100.0,  # 0..100 for readability
+            "features": v["features"],
+            "title": title,
+        })
     return scored
 
 
@@ -381,13 +562,25 @@ def rewrite_hook(text: str) -> str:
     first_sentence = sentences[0]
     rest = sentences[1] if len(sentences) > 1 else ""
 
-    prompt = f"""Rewrite this into a strong viral hook for a short video.
+    prompt = f"""Rewrite this opening line into a scroll-stopping viral hook.
 
-Rules:
-- Make it bold and curiosity-driven
-- Keep it short (under 15 words)
-- Keep the same language (if Hindi, write in Hindi; if English, write in English)
-- Do NOT add quotes or explanations — return ONLY the rewritten sentence
+Use ONE of these proven viral hook formats (pick whichever fits the content):
+  1. "You're doing X wrong"
+  2. "This is why X fails / doesn't work"
+  3. "Nobody tells you this about X"
+  4. "I wish I knew this earlier"
+  5. "This changed everything"
+  6. "The biggest mistake people make with X"
+  7. "Stop doing X — do this instead"
+  8. A surprising number / statistic ("99% of people…")
+
+Constraints:
+- Under 12 words.
+- Conversational, not corporate.
+- Keep the SAME language as the original (English / Hindi / Hinglish).
+- Do NOT translate.
+- Do NOT wrap in quotes.
+- Return ONLY the rewritten line — no preamble, no explanation.
 
 Original:
 {first_sentence}"""
@@ -457,12 +650,18 @@ def detect_clips(
         seg["start"] = max(0, seg["start"] - 1.0)
         seg["end"] = seg["end"] + 1.0
 
-    # ── Layer 3: Hybrid scoring ──
-    scored = hybrid_score(valid_segments)
+    # ── Layer 3: Multi-signal virality scoring ──
+    scored = hybrid_score_v2(valid_segments, chunks)
 
     # ── Sort and pick top N ──
     scored.sort(key=lambda x: x["score"], reverse=True)
     top = scored[:top_n]
+
+    if top:
+        feats = top[0].get("features", {})
+        logger.info(
+            f"Top clip score={top[0]['score']:.1f} features={ {k: round(v, 2) for k, v in feats.items()} }"
+        )
 
     # ── Hook rewriting (LLM optimization) ──
     for clip in top:
