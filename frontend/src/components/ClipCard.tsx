@@ -32,6 +32,31 @@ export default function ClipCard({ clip, index }: Props) {
     }
   }
 
+  let hookVariants: string[] = [];
+  if (data.hook_variants) {
+    try {
+      const parsed = JSON.parse(data.hook_variants);
+      if (Array.isArray(parsed)) hookVariants = parsed.filter((s) => typeof s === "string");
+    } catch {
+      hookVariants = [];
+    }
+  }
+
+  const applyHook = async (hook: string) => {
+    setCustomizing(true);
+    try {
+      // Reuse the customize flow — uses keyword "professional" so the video re-renders.
+      await customizeClip(
+        data.id,
+        `Use this exact viral hook as the title and rewrite the opening line of the transcript to use it: "${hook}". Keep everything else professional.`
+      );
+    } catch {
+      // silent fail
+    } finally {
+      setCustomizing(false);
+    }
+  };
+
   const handleRegenerate = async () => {
     setRegenerating(true);
     try {
@@ -214,6 +239,43 @@ export default function ClipCard({ clip, index }: Props) {
                 </div>
               );
             })}
+          </div>
+        </div>
+      )}
+
+      {/* A/B Hook Variants — pick a different viral hook for this clip */}
+      {hookVariants.length > 0 && (
+        <div className="mb-4 rounded-lg border border-[#333] bg-[#0a0a0a] p-3">
+          <p className="mb-2 text-xs font-medium text-[#ededed]">
+            🎯 Hook variants <span className="text-[#888]">— A/B test which hook performs best</span>
+          </p>
+          <div className="space-y-2">
+            {hookVariants.map((hook, i) => (
+              <div
+                key={i}
+                className="flex items-start gap-2 rounded-md border border-[#222] bg-[#0d0d0d] p-2"
+              >
+                <span className="mt-0.5 text-xs font-mono text-[#6d5dfc]">#{i + 1}</span>
+                <p className="flex-1 text-sm text-[#ededed]">{hook}</p>
+                <button
+                  type="button"
+                  onClick={() => navigator.clipboard?.writeText(hook)}
+                  className="text-xs text-[#888] hover:text-[#ededed]"
+                  title="Copy hook to clipboard"
+                >
+                  📋
+                </button>
+                <button
+                  type="button"
+                  onClick={() => applyHook(hook)}
+                  disabled={customizing}
+                  className="text-xs text-[#6d5dfc] hover:underline disabled:opacity-50"
+                  title="Re-render this clip using this hook"
+                >
+                  {customizing ? "..." : "Use →"}
+                </button>
+              </div>
+            ))}
           </div>
         </div>
       )}

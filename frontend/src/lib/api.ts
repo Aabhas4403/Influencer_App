@@ -96,6 +96,7 @@ export interface Clip {
   end_time: number;
   score: number;
   score_features: string | null;
+  hook_variants: string | null;
   title: string | null;
   transcript_text: string | null;
   video_path: string | null;

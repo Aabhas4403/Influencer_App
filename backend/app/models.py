@@ -74,6 +74,9 @@ class Clip(Base):
     # JSON dump of the per-feature breakdown that produced `score` (keyword,
     # emotion, rate, pause, structure, llm). Surfaced in the UI as "Why this clip?".
     score_features = Column(Text, nullable=True)
+    # JSON list of 3 alternative LLM-generated viral hooks. Used for A/B testing
+    # in the UI; the active hook is reflected in `title`.
+    hook_variants = Column(Text, nullable=True)
     title = Column(String(255), nullable=True)
     transcript_text = Column(Text, nullable=True)
     video_path = Column(Text, nullable=True)

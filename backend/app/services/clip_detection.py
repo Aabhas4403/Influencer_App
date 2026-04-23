@@ -594,6 +594,76 @@ Original:
     return text
 
 
+def generate_hook_variants(text: str, n: int = 3) -> List[str]:
+    """Use the LLM to produce N distinct viral-hook variants for A/B testing.
+
+    Returns a list of plain hook strings (no numbering, no quotes). Falls back
+    to a single rewritten hook if the LLM is unavailable or returns junk.
+    """
+    sentences = re.split(r'(?<=[.!?])\s+', text, maxsplit=1)
+    first_sentence = sentences[0] if sentences else text
+    if not first_sentence:
+        return []
+
+    prompt = f"""Write {n} DIFFERENT scroll-stopping viral hook variants for a short-form video.
+
+Each variant must use a DIFFERENT hook style. Mix from these formats:
+  - "You're doing X wrong"
+  - "Nobody tells you this about X"
+  - "The biggest mistake people make with X"
+  - "Stop doing X — do this instead"
+  - "I wish I knew this earlier"
+  - A surprising number / statistic ("99% of people…")
+  - A question that creates curiosity ("Have you ever wondered why X?")
+  - A bold claim that breaks expectations
+
+Constraints (apply to EVERY variant):
+- Under 12 words.
+- Conversational, not corporate.
+- Keep the SAME language as the original (English / Hindi / Hinglish).
+- Do NOT translate.
+- Do NOT wrap in quotes.
+
+Output format (STRICT):
+1. <hook 1>
+2. <hook 2>
+3. <hook 3>
+
+Original opening line:
+{first_sentence}"""
+
+    raw = _call_ollama(prompt, timeout=45)
+    if not raw:
+        # LLM unavailable — fall back to single rewrite
+        single = rewrite_hook(text)
+        return [single] if single else []
+
+    variants: List[str] = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # Only accept lines that look like a numbered/bulleted list item.
+        m = re.match(r'^\s*(?:[\-\*\u2022]|\d+\s*[\.\)\:\-])\s*(.+)$', line)
+        if not m:
+            continue
+        cleaned = m.group(1).strip().strip('"\'').strip()
+        # Drop any residual instruction-style preambles
+        low = cleaned.lower()
+        if any(p in low for p in ("here are", "here is", "different scroll", "viral hook variant",
+                                   "below are", "following are", "i'll provide")):
+            continue
+        if 3 < len(cleaned) < 200:
+            variants.append(cleaned)
+        if len(variants) >= n:
+            break
+
+    if not variants:
+        single = rewrite_hook(text)
+        return [single] if single else []
+    return variants
+
+
 # ─────────────── Main Entry Point ──────────────────
 
 def detect_clips(
@@ -663,15 +733,24 @@ def detect_clips(
             f"Top clip score={top[0]['score']:.1f} features={ {k: round(v, 2) for k, v in feats.items()} }"
         )
 
-    # ── Hook rewriting (LLM optimization) ──
+    # ── Hook rewriting + A/B variant generation (LLM optimization) ──
     for clip in top:
         original_text = clip["text"]
-        rewritten = rewrite_hook(original_text)
-        if rewritten != original_text:
-            clip["hook_rewritten"] = True
-            clip["original_text"] = original_text
-            clip["text"] = rewritten
-            logger.debug(f"Hook rewritten for: {clip.get('title', '')}")
+        variants = generate_hook_variants(original_text, n=3)
+        if variants:
+            clip["hook_variants"] = variants
+            chosen = variants[0]
+            # Replace the first sentence in the transcript with the chosen hook
+            sentences = re.split(r'(?<=[.!?])\s+', original_text, maxsplit=1)
+            rest = sentences[1] if len(sentences) > 1 else ""
+            new_text = f"{chosen} {rest}".strip() if rest else chosen
+            if new_text != original_text:
+                clip["hook_rewritten"] = True
+                clip["original_text"] = original_text
+                clip["text"] = new_text
+            logger.debug(f"Generated {len(variants)} hook variants for: {clip.get('title', '')}")
+        else:
+            clip["hook_variants"] = []
 
     logger.info(f"Detected {len(top)} clips (from {len(segments)} segments, {len(valid_segments)} valid)")
     return top

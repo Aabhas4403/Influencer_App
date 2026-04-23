@@ -84,6 +84,7 @@ async def _copy_from_cache(db, project, cached: Project):
             end_time=clip.end_time,
             score=clip.score,
             score_features=clip.score_features,
+            hook_variants=clip.hook_variants,
             title=clip.title,
             transcript_text=clip.transcript_text,
             video_path=clip.video_path,
@@ -212,15 +213,24 @@ async def run_pipeline(project_id: str):
                     })
                 # Optional: rewrite hooks with the LLM for the user's picks too.
                 if top_clips:
-                    from app.services.clip_detection import rewrite_hook
+                    from app.services.clip_detection import generate_hook_variants
                     for clip in top_clips:
                         if not clip["text"]:
                             continue
                         try:
-                            new_text = await asyncio.to_thread(rewrite_hook, clip["text"])
-                            if new_text and new_text != clip["text"]:
-                                clip["original_text"] = clip["text"]
-                                clip["text"] = new_text
+                            variants = await asyncio.to_thread(
+                                generate_hook_variants, clip["text"], 3
+                            )
+                            if variants:
+                                clip["hook_variants"] = variants
+                                # Replace first sentence with the chosen hook
+                                import re as _re
+                                sentences = _re.split(r'(?<=[.!?])\s+', clip["text"], maxsplit=1)
+                                rest = sentences[1] if len(sentences) > 1 else ""
+                                new_text = f"{variants[0]} {rest}".strip() if rest else variants[0]
+                                if new_text != clip["text"]:
+                                    clip["original_text"] = clip["text"]
+                                    clip["text"] = new_text
                         except Exception:
                             pass
                     logger.info(f"[{project_id}] Using {len(top_clips)} user-picked clips")
@@ -301,6 +311,10 @@ async def run_pipeline(project_id: str):
                     score_features=(
                         json.dumps(clip_data["features"])
                         if clip_data.get("features") else None
+                    ),
+                    hook_variants=(
+                        json.dumps(clip_data["hook_variants"])
+                        if clip_data.get("hook_variants") else None
                     ),
                     title=clip_data.get("title", f"Clip {i + 1}"),
                     transcript_text=clip_data["text"],
